@@ -76,6 +76,33 @@ st.markdown("""
 def disparar_foguete():
     st.markdown('<div class="rocket-container">🚀</div>', unsafe_allow_html=True)
 
+# --- SISTEMA DE LOGIN ---
+def login():
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+
+    if not st.session_state.authenticated:
+        st.title("🔐 Acesso Restrito - Gestão de Gates")
+        user = st.text_input("Usuário")
+        password = st.text_input("Senha", type="password")
+        
+        if st.button("Entrar"):
+            # Verifica contra o que está no Secrets
+            if user == st.secrets["credentials"]["master_user"] and \
+               password == st.secrets["credentials"]["master_password"]:
+                st.session_state.authenticated = True
+                st.session_state.user_role = "MASTER"
+                st.rerun()
+            else:
+                st.error("Usuário ou senha inválidos")
+        return False
+    return True
+
+# Só executa o resto do app se estiver logado
+if login():
+    # AQUI ENTRA TODO O SEU CÓDIGO ATUAL (Menu lateral, abas, etc.)
+    # Lembre-se de indentar (dar um 'tab') em todo o código abaixo para ele ficar dentro do 'if login()'
+
 # Conexão com Planilha
 conn = st.connection("gsheets", type=GSheetsConnection)
 
