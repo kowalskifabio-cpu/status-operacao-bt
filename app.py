@@ -75,7 +75,7 @@ st.markdown("""
 def disparar_foguete():
     st.markdown('<div class="rocket-container">🚀</div>', unsafe_allow_html=True)
 
-# --- SISTEMA DE LOGIN HÍBRIDO ---
+# --- SISTEMA DE LOGIN HÍBRIDO COM IDENTIFICAÇÃO DE NOME ---
 def login():
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
@@ -87,22 +87,20 @@ def login():
             user = st.text_input("Usuário")
             password = st.text_input("Senha", type="password")
             if st.button("Entrar"):
-                # 1. Tenta validar contra o Master no Secrets
+                # 1. Validação Master
                 if user == st.secrets["credentials"]["master_user"] and \
                    password == st.secrets["credentials"]["master_password"]:
                     st.session_state.authenticated = True
                     st.session_state.user_role = "MASTER"
-                    st.session_state.user_display = "Administrador"
+                    st.session_state.user_display = "Administrador" # Nome na Auditoria
                     st.session_state.papel_real = "Gerência Geral"
                     st.rerun()
                 
-                # 2. Se não for Master, busca na planilha Usuarios
+                # 2. Validação via Planilha
                 else:
                     try:
                         temp_conn = st.connection("gsheets", type=GSheetsConnection)
                         df_users = temp_conn.read(worksheet="Usuarios", ttl=0)
-                        
-                        # Limpeza básica de espaços para evitar erros de digitação
                         df_users['Usuario'] = df_users['Usuario'].astype(str).str.strip()
                         df_users['Senha'] = df_users['Senha'].astype(str).str.strip()
                         
@@ -111,7 +109,9 @@ def login():
                         if not user_match.empty:
                             st.session_state.authenticated = True
                             st.session_state.user_role = "USER"
-                            st.session_state.user_display = user
+                            # Tenta pegar o Nome Real, se não existir usa o Login
+                            nome_real = user_match['Nome'].iloc[0] if 'Nome' in user_match.columns else user
+                            st.session_state.user_display = nome_real if pd.notnull(nome_real) else user
                             st.session_state.papel_real = user_match['Papel'].iloc[0]
                             st.rerun()
                         else:
@@ -123,10 +123,8 @@ def login():
 
 # --- INÍCIO DA APLICAÇÃO PROTEGIDA ---
 if login():
-    # Conexão principal com Planilha
     conn = st.connection("gsheets", type=GSheetsConnection)
 
-    # --- FUNÇÃO: ATUALIZA O STATUS DO ITEM ---
     def atualizar_status_lote(lista_ids, novo_status):
         df_pedidos = conn.read(worksheet="Pedidos", ttl=0)
         df_pedidos.loc[df_pedidos['ID_Item'].isin(lista_ids), 'Status_Atual'] = novo_status
@@ -138,9 +136,7 @@ if login():
     else:
         st.sidebar.title("STATUS MARCENARIA")
 
-    st.sidebar.markdown(f"**Bem-vindo, {st.session_state.user_display}!**")
-    
-    # Travamento de Papel: Usuário comum não muda seu papel
+    st.sidebar.markdown(f"**👤 {st.session_state.user_display}**")
     papel_usuario = st.session_state.papel_real
     st.sidebar.info(f"Função: {papel_usuario}")
     
@@ -196,9 +192,7 @@ if login():
                 )
                 
                 if selecionados:
-                    # Trava de Segurança: Apenas Master, o Responsável (R) ou o Executor (E) podem assinar
                     pode_assinar = (papel_usuario == responsavel_r or papel_usuario == executor_e or papel_usuario == "Gerência Geral")
-                    
                     if papel_usuario == "Consulta": pode_assinar = False
 
                     with st.form(f"form_batch_{aba}"):
@@ -232,16 +226,11 @@ if login():
             df_p['Data_Entrega'] = pd.to_datetime(df_p['Data_Entrega'], errors='coerce')
             for idx, row in df_p.sort_values(by='Data_Entrega', na_position='last').iterrows():
                 dias = (row['Data_Entrega'].date() - date.today()).days if pd.notnull(row['Data_Entrega']) else None
-                
                 status_html = ""
-                if dias is None:
-                    status_html = '<span style="color: grey;">⚪ SEM DATA</span>'
-                elif dias < 0:
-                    status_html = f'<div class="alerta-pulsante">❌ ATRASADO ({abs(dias)}d)</div>'
-                elif dias <= 3:
-                    status_html = f'<div class="alerta-pulsante">🔴 URGENTE ({dias}d)</div>'
-                else:
-                    status_html = '<div class="no-prazo">🟢 NO PRAZO</div>'
+                if dias is None: status_html = '<span style="color: grey;">⚪ SEM DATA</span>'
+                elif dias < 0: status_html = f'<div class="alerta-pulsante">❌ ATRASADO ({abs(dias)}d)</div>'
+                elif dias <= 3: status_html = f'<div class="alerta-pulsante">🔴 URGENTE ({dias}d)</div>'
+                else: status_html = '<div class="no-prazo">🟢 NO PRAZO</div>'
 
                 c1, c2, c3, c4 = st.columns([2, 4, 2, 2])
                 with c1: st.write(f"**{row['CTR']}**")
@@ -287,6 +276,7 @@ if login():
             st.warning("Seu acesso é apenas de consulta. Alterações desabilitadas.")
         try:
             df_p = conn.read(worksheet="Pedidos", ttl=0)
+            df_p['Data_Entrega_Raw'] = df_p['Data_Entrega']
             df_p['Data_Entrega'] = pd.to_datetime(df_p['Data_Entrega'], errors='coerce').dt.strftime('%Y-%m-%d').fillna('')
             ctr_lista = sorted(df_p['CTR'].unique().tolist())
             ctr_sel = st.selectbox("Selecione a CTR para gerenciar:", [""] + ctr_lista)
@@ -304,13 +294,24 @@ if login():
                             
                             pode_mudar = papel_usuario in ["Gerência Geral", "PCP"]
                             if st.form_submit_button("Salvar Alterações", disabled=not pode_mudar):
+                                # Atualiza Planilha Pedidos
                                 df_p.loc[df_p['ID_Item'] == row['ID_Item'], 'Dono'] = n_gestor
                                 df_p.loc[df_p['ID_Item'] == row['ID_Item'], 'Data_Entrega'] = n_data.strftime('%Y-%m-%d')
-                                conn.update(worksheet="Pedidos", data=df_p)
+                                df_save = df_p.drop(columns=['Data_Entrega_Raw'])
+                                conn.update(worksheet="Pedidos", data=df_save)
+                                
+                                # REGISTRO DE AUDITORIA AUTOMÁTICO
                                 df_alt = conn.read(worksheet="Alteracoes", ttl=0)
-                                log = pd.DataFrame([{"Data": datetime.now().strftime("%d/%m/%Y %H:%M"), "Pedido": row['Pedido'], "CTR": row['CTR'], "Usuario": st.session_state.user_display, "O que mudou": f"Manual: Data {n_data} / Gestor {n_gestor}. Motivo: {n_motivo}"}])
+                                log = pd.DataFrame([{
+                                    "Data": datetime.now().strftime("%d/%m/%Y %H:%M"), 
+                                    "Pedido": row['Pedido'], 
+                                    "CTR": row['CTR'], 
+                                    "Usuario": st.session_state.user_display, # Nome Real configurado no login
+                                    "O que mudou": f"GESTÃO INDIVIDUAL: Novo Gestor: {n_gestor} / Nova Data: {n_data}. Motivo: {n_motivo}"
+                                }])
                                 conn.update(worksheet="Alteracoes", data=pd.concat([df_alt, log], ignore_index=True))
-                                st.success("Item atualizado!"); time.sleep(0.5); st.rerun()
+                                
+                                st.success("Item atualizado e registrado na Auditoria!"); time.sleep(0.5); st.rerun()
         except Exception as e: st.error(f"Erro na gestão: {e}")
 
     elif menu == "📥 Importar Itens (Sistema)":
