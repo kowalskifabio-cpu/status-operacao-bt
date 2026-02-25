@@ -143,7 +143,7 @@ if login():
         
     menu = st.sidebar.radio("Navegação", opcoes_menu)
 
-    # --- FUNÇÃO DE GESTÃO DE GATES ---
+    # --- FUNÇÃO DE GESTÃO DE GATES (CORRIGIDA) ---
     def checklist_gate(gate_id, aba, itens_checklist, responsavel_r, executor_e, msg_bloqueio, proximo_status, objetivo, momento):
         st.header(f"Ficha de Controle: {gate_id}")
         st.markdown(f"**Objetivo:** {objetivo} | **Momento:** {momento}")
@@ -175,10 +175,13 @@ if login():
                         respostas = {}
                         for secao, itens in itens_checklist.items():
                             st.markdown(f"#### 🔹 {secao}")
-                            for item in itens: respostas[item] = st.checkbox(item)
-                        obs = st.text_area("Observações Técnicas")
+                            for item in itens: 
+                                # CHAVE ÚNICA PARA EVITAR ERRO DE ID REPETIDO
+                                respostas[item] = st.checkbox(item, key=f"chk_{gate_id}_{aba}_{item.replace(' ', '_')}")
                         
+                        obs = st.text_area("Observações Técnicas")
                         btn_label = "VALIDAR LOTE SELECIONADO 🚀" if pode_assinar else "ACESSO APENAS PARA LEITURA"
+                        
                         if st.form_submit_button(btn_label, disabled=not pode_assinar):
                             if not all(respostas.values()): st.error(f"❌ BLOQUEIO: {msg_bloqueio}")
                             else:
@@ -263,20 +266,14 @@ if login():
         try:
             df_p = conn.read(worksheet="Pedidos", ttl="1m")
             df_aud = conn.read(worksheet="Alteracoes", ttl="1m")
-            
-            # Filtros de Tempo
             df_aud['DT_Filtro'] = pd.to_datetime(df_aud['Data'], format="%d/%m/%Y %H:%M", errors='coerce')
             anos = sorted(df_aud['DT_Filtro'].dt.year.dropna().unique().tolist(), reverse=True)
             meses = {1: "Janeiro", 2: "Fevereiro", 3: "Março", 4: "Abril", 5: "Maio", 6: "Junho", 7: "Julho", 8: "Agosto", 9: "Setembro", 10: "Outubro", 11: "Novembro", 12: "Dezembro"}
-            
             c_f1, c_f2 = st.columns(2)
             ano_sel = c_f1.selectbox("Ano", anos if anos else [datetime.now().year])
             mes_sel_num = c_f2.selectbox("Mês", list(meses.keys()), format_func=lambda x: meses[x], index=datetime.now().month-1)
-            
-            # Filtragem dos dados
             df_aud_f = df_aud[(df_aud['DT_Filtro'].dt.year == ano_sel) & (df_aud['DT_Filtro'].dt.month == mes_sel_num)]
             
-            # 1. Pedidos por Portão (Status Atual)
             st.subheader("🚧 Fluxo de Itens por Portão")
             gates_count = df_p['Status_Atual'].value_counts()
             c_g1, c_g2, c_g3, c_g4, c_g5 = st.columns(5)
@@ -287,41 +284,25 @@ if login():
             c_g5.metric("Concluídos", gates_count.get("CONCLUÍDO ✅", 0))
             
             st.markdown("---")
-            
-            # 2. Performance de Prazos e Auditoria
             st.subheader(f"📊 Performance - {meses[mes_sel_num]}/{ano_sel}")
-            
-            # Calculando atrasos do mês (baseado na data de entrega)
             df_p['Entrega_DT'] = pd.to_datetime(df_p['Data_Entrega'], errors='coerce')
             itens_mes = df_p[(df_p['Entrega_DT'].dt.year == ano_sel) & (df_p['Entrega_DT'].dt.month == mes_sel_num)]
-            
             atrasados = len(itens_mes[(itens_mes['Entrega_DT'].dt.date < date.today()) & (itens_mes['Status_Atual'] != "CONCLUÍDO ✅")])
             no_prazo = len(itens_mes) - atrasados
-            
-            # Alterações e Impactos (Vem da Auditoria)
             alterados_ids = df_aud_f[df_aud_f['O que mudou'].str.contains("LOTE:", na=False)]['Pedido'].unique()
             com_imp_financeiro = len(df_aud_f[df_aud_f['Impacto Financeiro'] == "Sim"])
             com_imp_prazo = len(df_aud_f[df_aud_f['Impacto no Prazo'] == "Sim"])
-            
-            # Indicadores de Qualidade de Processo
             passaram_limpos = len(itens_mes) - len(alterados_ids)
             
             m1, m2, m3 = st.columns(3)
-            m1.metric("No Prazo", f"{no_prazo}", delta=f"{no_prazo/(len(itens_mes) if len(itens_mes)>0 else 1):.0%}")
-            m2.metric("Atrasados", f"{atrasados}", delta_color="inverse", delta=f"-{atrasados/(len(itens_mes) if len(itens_mes)>0 else 1):.0%}")
+            m1.metric("No Prazo", f"{no_prazo}")
+            m2.metric("Atrasados", f"{atrasados}", delta_color="inverse")
             m3.metric("Sem Alterações (Limpos)", f"{max(0, passaram_limpos)}")
             
             m4, m5, m6 = st.columns(3)
             m4.metric("Impacto Financeiro 💰", f"{com_imp_financeiro}", delta_color="inverse")
             m5.metric("Impacto no Prazo ⏰", f"{com_imp_prazo}", delta_color="inverse")
             m6.metric("Total de Itens Alterados", f"{len(alterados_ids)}")
-            
-            # Gráfico de Gestores com mais Alterações (Relevant Indicador)
-            if not df_aud_f.empty:
-                st.subheader("👤 Alterações por Usuário (Auditoria)")
-                user_changes = df_aud_f['Usuario'].value_counts()
-                st.bar_chart(user_changes)
-
         except Exception as e: st.error(f"Erro nos indicadores: {e}")
 
     elif menu == "📥 Importar Itens (Sistema)":
@@ -393,6 +374,7 @@ if login():
             st.table(df_aud)
         except Exception as e: st.error(f"Erro na auditoria: {e}")
 
+    # --- EXECUÇÃO DOS GATES ---
     elif menu == "✅ Gate 1: Aceite Técnico":
         itens = {"Informações Comerciais": ["Pedido registrado", "Cliente identificado", "Tipo de obra definido", "Responsável identificado"], "Escopo Técnico": ["Projeto mínimo recebido", "Ambientes definidos", "Materiais principais", "Itens fora do padrão"], "Prazo (prévia)": ["Prazo solicitado registrado", "Prazo avaliado", "Risco de prazo"], "Governança": ["Dono do Pedido definido", "PCP validou viabilidade", "Aprovado formalmente"]}
         checklist_gate("GATE 1", "Checklist_G1", itens, "Dono do Pedido (DP)", "PCP", "Projeto incompleto ➡️ BLOQUEADO", "Aguardando Produção (G2)", "Impedir entrada mal definida", "Antes do plano")
@@ -402,7 +384,7 @@ if login():
         checklist_gate("GATE 2", "Checklist_G2", itens, "PCP", "Produção", "Sem plano ➡️ BLOQUEADO", "Aguardando Materiais (G3)", "Produzir planejado", "No corte")
 
     elif menu == "💰 Gate 3: Material":
-        itens = {"Materiais": ["Lista validada", "Quantidades conferidas", "Materiais especiais"], "Compras": ["Fornecedores definidos", "Lead times confirmados", "Lead times confirmados", "Datas registradas"], "Financeiro": ["Impacto caixa validado", "Compra autorizada", "Forma de pagamento"]}
+        itens = {"Materiais": ["Lista validada", "Quantidades conferidas", "Materiais especiais"], "Compras": ["Fornecedores definidos", "Lead times confirmados", "Datas registradas"], "Financeiro": ["Impacto caixa validado", "Compra autorizada", "Forma de pagamento"]}
         checklist_gate("GATE 3", "Checklist_G3", itens, "Financeiro", "Compras", "Falta material ➡️ PARADO", "Aguardando Entrega (G4)", "Fábrica sem parada", "Na montagem")
 
     elif menu == "🚛 Gate 4: Entrega":
