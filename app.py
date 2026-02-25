@@ -124,6 +124,7 @@ def login():
 if login():
     conn = st.connection("gsheets", type=GSheetsConnection)
 
+    # Função otimizada para atualizar status (lê com ttl=0 para garantir precisão na escrita)
     def atualizar_status_lote(lista_ids, novo_status):
         df_pedidos = conn.read(worksheet="Pedidos", ttl=0)
         df_pedidos.loc[df_pedidos['ID_Item'].isin(lista_ids), 'Status_Atual'] = novo_status
@@ -145,11 +146,10 @@ if login():
 
     st.sidebar.markdown("---")
     
-    # --- LÓGICA DE FILTRO DO MENU POR PAPEL ---
+    # --- LISTA DE OPÇÕES DO MENU (Sem Gestão por Pedido) ---
     opcoes_menu = [
         "📊 Resumo e Prazos (Itens)", 
         "📉 Monitor por Pedido (CTR)", 
-        "📦 Gestão por Pedido",
         "🚨 Auditoria", 
         "📥 Importar Itens (Sistema)",
         "✅ Gate 1: Aceite Técnico", 
@@ -160,14 +160,14 @@ if login():
         "⚠️ Alteração de Pedido"
     ]
 
-    # Melhoria: Se o papel for "Dono do Pedido (DP)", removemos a Auditoria da lista
+    # Filtro: Se o papel for "Dono do Pedido (DP)", removemos a Auditoria
     if papel_usuario == "Dono do Pedido (DP)":
         if "🚨 Auditoria" in opcoes_menu:
             opcoes_menu.remove("🚨 Auditoria")
 
     menu = st.sidebar.radio("Navegação", opcoes_menu)
 
-    # --- FUNÇÃO DE GESTÃO DE GATES ---
+    # --- FUNÇÃO DE GESTÃO DE GATES (Otimizada para Cota) ---
     def checklist_gate(gate_id, aba, itens_checklist, responsavel_r, executor_e, msg_bloqueio, proximo_status, objetivo, momento):
         st.header(f"Ficha de Controle: {gate_id}")
         st.markdown(f"**Objetivo:** {objetivo} | **Momento:** {momento}")
@@ -276,49 +276,6 @@ if login():
                     st.markdown("---")
         except Exception as e: st.error(f"Erro no monitor por pedido: {e}")
 
-    elif menu == "📦 Gestão por Pedido":
-        st.header("📦 Gestão de Itens por CTR")
-        if papel_usuario == "Consulta":
-            st.warning("Seu acesso é apenas de consulta. Alterações desabilitadas.")
-        try:
-            df_p = conn.read(worksheet="Pedidos", ttl="1m")
-            df_p['Data_Entrega_Raw'] = df_p['Data_Entrega']
-            df_p['Data_Entrega'] = pd.to_datetime(df_p['Data_Entrega'], errors='coerce').dt.strftime('%Y-%m-%d').fillna('')
-            ctr_lista = sorted(df_p['CTR'].unique().tolist())
-            ctr_sel = st.selectbox("Selecione a CTR para gerenciar:", [""] + ctr_lista)
-            if ctr_sel:
-                itens_ctr = df_p[df_p['CTR'] == ctr_sel].copy()
-                for idx, row in itens_ctr.iterrows():
-                    with st.expander(f"Item: {row['Pedido']} | Status: {row['Status_Atual']}"):
-                        with st.form(f"form_edit_{row['ID_Item']}_{idx}"):
-                            col1, col2 = st.columns(2)
-                            n_gestor = col1.text_input("Gestor Responsável", value=row['Dono'])
-                            try: val_data = datetime.strptime(row['Data_Entrega'], '%Y-%m-%d').date() if row['Data_Entrega'] else date.today()
-                            except: val_data = date.today()
-                            n_data = col2.date_input("Nova Data de Entrega", value=val_data)
-                            n_motivo = st.text_area("Motivo do Ajuste Manual")
-                            
-                            pode_mudar = papel_usuario in ["Gerência Geral", "PCP"]
-                            if st.form_submit_button("Salvar Alterações", disabled=not pode_mudar):
-                                df_p.loc[df_p['ID_Item'] == row['ID_Item'], 'Dono'] = n_gestor
-                                df_p.loc[df_p['ID_Item'] == row['ID_Item'], 'Data_Entrega'] = n_data.strftime('%Y-%m-%d')
-                                df_save = df_p.drop(columns=['Data_Entrega_Raw'])
-                                conn.update(worksheet="Pedidos", data=df_save)
-                                
-                                # REGISTRO DE AUDITORIA AUTOMÁTICO NA GESTÃO INDIVIDUAL
-                                df_alt = conn.read(worksheet="Alteracoes", ttl=0)
-                                log = pd.DataFrame([{
-                                    "Data": datetime.now().strftime("%d/%m/%Y %H:%M"), 
-                                    "Pedido": row['Pedido'], 
-                                    "CTR": row['CTR'], 
-                                    "Usuario": st.session_state.user_display,
-                                    "O que mudou": f"GESTÃO INDIVIDUAL: Novo Gestor: {n_gestor} / Nova Data: {n_data}. Motivo: {n_motivo}"
-                                }])
-                                conn.update(worksheet="Alteracoes", data=pd.concat([df_alt, log], ignore_index=True))
-                                
-                                st.success("Item atualizado!"); time.sleep(0.5); st.rerun()
-        except Exception as e: st.error(f"Erro na gestão: {e}")
-
     elif menu == "📥 Importar Itens (Sistema)":
         st.header("📥 Importar Itens da Marcenaria")
         if papel_usuario not in ["Gerência Geral", "PCP"]:
@@ -372,6 +329,7 @@ if login():
                                     df_save = df_p.drop(columns=['Data_Entrega_Str'])
                                     conn.update(worksheet="Pedidos", data=df_save)
                                     df_alt = conn.read(worksheet="Alteracoes", ttl=0)
+                                    # Grava Nome Real na Auditoria
                                     logs = [{"Data": datetime.now().strftime("%d/%m/%Y %H:%M"), "Pedido": df_p[df_p['ID_Item']==id]['Pedido'].iloc[0], "CTR": ctr_sel, "Usuario": st.session_state.user_display, "O que mudou": f"LOTE: Data {nova_data} / Gestor {novo_gestor}. Motivo: {motivo}"} for id in selecionados]
                                     conn.update(worksheet="Alteracoes", data=pd.concat([df_alt, pd.DataFrame(logs)], ignore_index=True))
                                     st.success("Atualizados!"); disparar_foguete(); time.sleep(1); st.rerun()
