@@ -75,7 +75,7 @@ st.markdown("""
 def disparar_foguete():
     st.markdown('<div class="rocket-container">🚀</div>', unsafe_allow_html=True)
 
-# --- SISTEMA DE LOGIN HÍBRIDO COM IDENTIFICAÇÃO DE NOME ---
+# --- SISTEMA DE LOGIN HÍBRIDO COM NOME REAL ---
 def login():
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
@@ -87,20 +87,21 @@ def login():
             user = st.text_input("Usuário")
             password = st.text_input("Senha", type="password")
             if st.button("Entrar"):
-                # 1. Validação Master
+                # 1. Validação Master via Secrets
                 if user == st.secrets["credentials"]["master_user"] and \
                    password == st.secrets["credentials"]["master_password"]:
                     st.session_state.authenticated = True
                     st.session_state.user_role = "MASTER"
-                    st.session_state.user_display = "Administrador" # Nome na Auditoria
+                    st.session_state.user_display = "Administrador (Master)" 
                     st.session_state.papel_real = "Gerência Geral"
                     st.rerun()
                 
-                # 2. Validação via Planilha
+                # 2. Validação via Planilha Usuarios
                 else:
                     try:
                         temp_conn = st.connection("gsheets", type=GSheetsConnection)
                         df_users = temp_conn.read(worksheet="Usuarios", ttl=0)
+                        
                         df_users['Usuario'] = df_users['Usuario'].astype(str).str.strip()
                         df_users['Senha'] = df_users['Senha'].astype(str).str.strip()
                         
@@ -109,9 +110,11 @@ def login():
                         if not user_match.empty:
                             st.session_state.authenticated = True
                             st.session_state.user_role = "USER"
-                            # Tenta pegar o Nome Real, se não existir usa o Login
-                            nome_real = user_match['Nome'].iloc[0] if 'Nome' in user_match.columns else user
-                            st.session_state.user_display = nome_real if pd.notnull(nome_real) else user
+                            
+                            # Tenta capturar o Nome da coluna 'Nome', se falhar usa o login
+                            nome_na_tabela = user_match['Nome'].iloc[0] if 'Nome' in user_match.columns else user
+                            st.session_state.user_display = nome_na_tabela if pd.notnull(nome_na_tabela) else user
+                            
                             st.session_state.papel_real = user_match['Papel'].iloc[0]
                             st.rerun()
                         else:
@@ -209,6 +212,7 @@ if login():
                                 df_gate = conn.read(worksheet=aba, ttl=0)
                                 novas_linhas = []
                                 for id_item in selecionados:
+                                    # Grava o Nome Real na coluna Validado_Por
                                     nova = {"Data": datetime.now().strftime("%d/%m/%Y %H:%M"), "ID_Item": id_item, "Validado_Por": st.session_state.user_display, "Obs": obs}
                                     nova.update(respostas); novas_linhas.append(nova)
                                 conn.update(worksheet=aba, data=pd.concat([df_gate, pd.DataFrame(novas_linhas)], ignore_index=True))
@@ -300,18 +304,18 @@ if login():
                                 df_save = df_p.drop(columns=['Data_Entrega_Raw'])
                                 conn.update(worksheet="Pedidos", data=df_save)
                                 
-                                # REGISTRO DE AUDITORIA AUTOMÁTICO
+                                # --- REGISTRO DE AUDITORIA AUTOMÁTICO PARA GESTÃO INDIVIDUAL ---
                                 df_alt = conn.read(worksheet="Alteracoes", ttl=0)
                                 log = pd.DataFrame([{
                                     "Data": datetime.now().strftime("%d/%m/%Y %H:%M"), 
                                     "Pedido": row['Pedido'], 
                                     "CTR": row['CTR'], 
-                                    "Usuario": st.session_state.user_display, # Nome Real configurado no login
+                                    "Usuario": st.session_state.user_display, # Usa o Nome Real do usuário logado
                                     "O que mudou": f"GESTÃO INDIVIDUAL: Novo Gestor: {n_gestor} / Nova Data: {n_data}. Motivo: {n_motivo}"
                                 }])
                                 conn.update(worksheet="Alteracoes", data=pd.concat([df_alt, log], ignore_index=True))
                                 
-                                st.success("Item atualizado e registrado na Auditoria!"); time.sleep(0.5); st.rerun()
+                                st.success(f"Item atualizado! Auditoria registrada como {st.session_state.user_display}."); time.sleep(0.5); st.rerun()
         except Exception as e: st.error(f"Erro na gestão: {e}")
 
     elif menu == "📥 Importar Itens (Sistema)":
@@ -367,6 +371,7 @@ if login():
                                     df_save = df_p.drop(columns=['Data_Entrega_Str'])
                                     conn.update(worksheet="Pedidos", data=df_save)
                                     df_alt = conn.read(worksheet="Alteracoes", ttl=0)
+                                    # Grava Nome Real na Auditoria de Lote
                                     logs = [{"Data": datetime.now().strftime("%d/%m/%Y %H:%M"), "Pedido": df_p[df_p['ID_Item']==id]['Pedido'].iloc[0], "CTR": ctr_sel, "Usuario": st.session_state.user_display, "O que mudou": f"LOTE: Data {nova_data} / Gestor {novo_gestor}. Motivo: {motivo}"} for id in selecionados]
                                     conn.update(worksheet="Alteracoes", data=pd.concat([df_alt, pd.DataFrame(logs)], ignore_index=True))
                                     st.success("Atualizados!"); disparar_foguete(); time.sleep(1); st.rerun()
