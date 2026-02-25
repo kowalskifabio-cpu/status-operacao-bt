@@ -124,7 +124,7 @@ def login():
 if login():
     conn = st.connection("gsheets", type=GSheetsConnection)
 
-    # Função otimizada para atualizar status (lê com ttl=0 para garantir precisão na escrita)
+    # Função otimizada para atualizar status
     def atualizar_status_lote(lista_ids, novo_status):
         df_pedidos = conn.read(worksheet="Pedidos", ttl=0)
         df_pedidos.loc[df_pedidos['ID_Item'].isin(lista_ids), 'Status_Atual'] = novo_status
@@ -146,7 +146,7 @@ if login():
 
     st.sidebar.markdown("---")
     
-    # --- LISTA DE OPÇÕES DO MENU (Sem Gestão por Pedido) ---
+    # --- LISTA DE OPÇÕES DO MENU (Removido Cadastro de Gestores conforme solicitado) ---
     opcoes_menu = [
         "📊 Resumo e Prazos (Itens)", 
         "📉 Monitor por Pedido (CTR)", 
@@ -156,7 +156,6 @@ if login():
         "🏭 Gate 2: Produção", 
         "💰 Gate 3: Material", 
         "🚛 Gate 4: Entrega",
-        "👤 Cadastro de Gestores",
         "⚠️ Alteração de Pedido"
     ]
 
@@ -167,7 +166,7 @@ if login():
 
     menu = st.sidebar.radio("Navegação", opcoes_menu)
 
-    # --- FUNÇÃO DE GESTÃO DE GATES (Otimizada para Cota) ---
+    # --- FUNÇÃO DE GESTÃO DE GATES ---
     def checklist_gate(gate_id, aba, itens_checklist, responsavel_r, executor_e, msg_bloqueio, proximo_status, objetivo, momento):
         st.header(f"Ficha de Controle: {gate_id}")
         st.markdown(f"**Objetivo:** {objetivo} | **Momento:** {momento}")
@@ -329,7 +328,6 @@ if login():
                                     df_save = df_p.drop(columns=['Data_Entrega_Str'])
                                     conn.update(worksheet="Pedidos", data=df_save)
                                     df_alt = conn.read(worksheet="Alteracoes", ttl=0)
-                                    # Grava Nome Real na Auditoria
                                     logs = [{"Data": datetime.now().strftime("%d/%m/%Y %H:%M"), "Pedido": df_p[df_p['ID_Item']==id]['Pedido'].iloc[0], "CTR": ctr_sel, "Usuario": st.session_state.user_display, "O que mudou": f"LOTE: Data {nova_data} / Gestor {novo_gestor}. Motivo: {motivo}"} for id in selecionados]
                                     conn.update(worksheet="Alteracoes", data=pd.concat([df_alt, pd.DataFrame(logs)], ignore_index=True))
                                     st.success("Atualizados!"); disparar_foguete(); time.sleep(1); st.rerun()
@@ -357,15 +355,3 @@ if login():
             df_aud = conn.read(worksheet="Alteracoes", ttl="1m")
             st.table(df_aud)
         except Exception as e: st.error(f"Erro na auditoria: {e}")
-
-    elif menu == "👤 Cadastro de Gestores":
-        st.header("Gestores")
-        if papel_usuario not in ["Gerência Geral", "PCP"]:
-            st.warning("Somente Gerência pode cadastrar novos gestores.")
-        else:
-            with st.form("f_g"):
-                n = st.text_input("Nome")
-                if st.form_submit_button("Salvar"):
-                    df = conn.read(worksheet="Gestores", ttl=0)
-                    conn.update(worksheet="Gestores", data=pd.concat([df, pd.DataFrame([{"Nome": n}])], ignore_index=True))
-                    st.success("Salvo!")
