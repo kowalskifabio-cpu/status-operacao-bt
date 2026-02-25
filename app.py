@@ -87,7 +87,6 @@ def login():
             user = st.text_input("Usuário")
             password = st.text_input("Senha", type="password")
             if st.button("Entrar"):
-                # 1. Validação Master via Secrets
                 if user == st.secrets["credentials"]["master_user"] and \
                    password == st.secrets["credentials"]["master_password"]:
                     st.session_state.authenticated = True
@@ -95,13 +94,11 @@ def login():
                     st.session_state.user_display = "Administrador (Master)" 
                     st.session_state.papel_real = "Gerência Geral"
                     st.rerun()
-                
-                # 2. Validação via Planilha Usuarios
                 else:
                     try:
                         temp_conn = st.connection("gsheets", type=GSheetsConnection)
-                        df_users = temp_conn.read(worksheet="Usuarios", ttl=0)
-                        
+                        # Usando cache de 1 minuto para o login para evitar erro 429 na tela inicial
+                        df_users = temp_conn.read(worksheet="Usuarios", ttl="1m")
                         df_users['Usuario'] = df_users['Usuario'].astype(str).str.strip()
                         df_users['Senha'] = df_users['Senha'].astype(str).str.strip()
                         
@@ -110,11 +107,8 @@ def login():
                         if not user_match.empty:
                             st.session_state.authenticated = True
                             st.session_state.user_role = "USER"
-                            
-                            # Tenta capturar o Nome da coluna 'Nome', se falhar usa o login
                             nome_na_tabela = user_match['Nome'].iloc[0] if 'Nome' in user_match.columns else user
                             st.session_state.user_display = nome_na_tabela if pd.notnull(nome_na_tabela) else user
-                            
                             st.session_state.papel_real = user_match['Papel'].iloc[0]
                             st.rerun()
                         else:
@@ -128,6 +122,7 @@ def login():
 if login():
     conn = st.connection("gsheets", type=GSheetsConnection)
 
+    # Função otimizada para atualizar status (lê com ttl=0 para garantir precisão na escrita)
     def atualizar_status_lote(lista_ids, novo_status):
         df_pedidos = conn.read(worksheet="Pedidos", ttl=0)
         df_pedidos.loc[df_pedidos['ID_Item'].isin(lista_ids), 'Status_Atual'] = novo_status
@@ -164,14 +159,15 @@ if login():
             "⚠️ Alteração de Pedido"
         ])
 
-    # --- FUNÇÃO DE GESTÃO DE GATES ---
+    # --- FUNÇÃO DE GESTÃO DE GATES (Otimizada para Cota) ---
     def checklist_gate(gate_id, aba, itens_checklist, responsavel_r, executor_e, msg_bloqueio, proximo_status, objetivo, momento):
         st.header(f"Ficha de Controle: {gate_id}")
         st.markdown(f"**Objetivo:** {objetivo} | **Momento:** {momento}")
         st.info(f"⚖️ **R:** {responsavel_r} | 🔨 **E:** {executor_e}")
         
         try:
-            df_pedidos = conn.read(worksheet="Pedidos", ttl=0)
+            # Usando cache de 2 minutos para navegação de gates
+            df_pedidos = conn.read(worksheet="Pedidos", ttl="2m")
             status_requerido = "Aguardando Gate 1" if gate_id == "GATE 1" else \
                                "Aguardando Produção (G2)" if gate_id == "GATE 2" else \
                                "Aguardando Materiais (G3)" if gate_id == "GATE 3" else \
@@ -212,7 +208,6 @@ if login():
                                 df_gate = conn.read(worksheet=aba, ttl=0)
                                 novas_linhas = []
                                 for id_item in selecionados:
-                                    # Grava o Nome Real na coluna Validado_Por
                                     nova = {"Data": datetime.now().strftime("%d/%m/%Y %H:%M"), "ID_Item": id_item, "Validado_Por": st.session_state.user_display, "Obs": obs}
                                     nova.update(respostas); novas_linhas.append(nova)
                                 conn.update(worksheet=aba, data=pd.concat([df_gate, pd.DataFrame(novas_linhas)], ignore_index=True))
@@ -226,7 +221,8 @@ if login():
     if menu == "📊 Resumo e Prazos (Itens)":
         st.header("🚦 Monitor de Produção (Itens)")
         try:
-            df_p = conn.read(worksheet="Pedidos", ttl=0)
+            # TTL de 5 minutos para o dashboard principal
+            df_p = conn.read(worksheet="Pedidos", ttl="5m")
             df_p['Data_Entrega'] = pd.to_datetime(df_p['Data_Entrega'], errors='coerce')
             for idx, row in df_p.sort_values(by='Data_Entrega', na_position='last').iterrows():
                 dias = (row['Data_Entrega'].date() - date.today()).days if pd.notnull(row['Data_Entrega']) else None
@@ -247,7 +243,7 @@ if login():
     elif menu == "📉 Monitor por Pedido (CTR)":
         st.header("📉 Monitor de Produção por CTR")
         try:
-            df_p = conn.read(worksheet="Pedidos", ttl=0)
+            df_p = conn.read(worksheet="Pedidos", ttl="5m")
             df_p['Data_Entrega_DT'] = pd.to_datetime(df_p['Data_Entrega'], errors='coerce')
             ctrs = df_p.groupby('CTR').agg({'ID_Item': 'count', 'Data_Entrega_DT': 'min', 'Dono': 'first'}).reset_index()
             for _, row in ctrs.sort_values(by='Data_Entrega_DT').iterrows():
@@ -279,7 +275,8 @@ if login():
         if papel_usuario == "Consulta":
             st.warning("Seu acesso é apenas de consulta. Alterações desabilitadas.")
         try:
-            df_p = conn.read(worksheet="Pedidos", ttl=0)
+            # Para gestão, ttl menor para ver mudanças rápidas
+            df_p = conn.read(worksheet="Pedidos", ttl="1m")
             df_p['Data_Entrega_Raw'] = df_p['Data_Entrega']
             df_p['Data_Entrega'] = pd.to_datetime(df_p['Data_Entrega'], errors='coerce').dt.strftime('%Y-%m-%d').fillna('')
             ctr_lista = sorted(df_p['CTR'].unique().tolist())
@@ -298,24 +295,23 @@ if login():
                             
                             pode_mudar = papel_usuario in ["Gerência Geral", "PCP"]
                             if st.form_submit_button("Salvar Alterações", disabled=not pode_mudar):
-                                # Atualiza Planilha Pedidos
                                 df_p.loc[df_p['ID_Item'] == row['ID_Item'], 'Dono'] = n_gestor
                                 df_p.loc[df_p['ID_Item'] == row['ID_Item'], 'Data_Entrega'] = n_data.strftime('%Y-%m-%d')
                                 df_save = df_p.drop(columns=['Data_Entrega_Raw'])
                                 conn.update(worksheet="Pedidos", data=df_save)
                                 
-                                # --- REGISTRO DE AUDITORIA AUTOMÁTICO PARA GESTÃO INDIVIDUAL ---
+                                # AUDITORIA AUTOMÁTICA GESTÃO INDIVIDUAL
                                 df_alt = conn.read(worksheet="Alteracoes", ttl=0)
                                 log = pd.DataFrame([{
                                     "Data": datetime.now().strftime("%d/%m/%Y %H:%M"), 
                                     "Pedido": row['Pedido'], 
                                     "CTR": row['CTR'], 
-                                    "Usuario": st.session_state.user_display, # Usa o Nome Real do usuário logado
+                                    "Usuario": st.session_state.user_display,
                                     "O que mudou": f"GESTÃO INDIVIDUAL: Novo Gestor: {n_gestor} / Nova Data: {n_data}. Motivo: {n_motivo}"
                                 }])
                                 conn.update(worksheet="Alteracoes", data=pd.concat([df_alt, log], ignore_index=True))
                                 
-                                st.success(f"Item atualizado! Auditoria registrada como {st.session_state.user_display}."); time.sleep(0.5); st.rerun()
+                                st.success("Item atualizado!"); time.sleep(0.5); st.rerun()
         except Exception as e: st.error(f"Erro na gestão: {e}")
 
     elif menu == "📥 Importar Itens (Sistema)":
@@ -345,7 +341,7 @@ if login():
             st.error("Acesso negado para esta função.")
         else:
             try:
-                df_p = conn.read(worksheet="Pedidos", ttl=0)
+                df_p = conn.read(worksheet="Pedidos", ttl="1m")
                 df_p['Data_Entrega_Str'] = pd.to_datetime(df_p['Data_Entrega'], errors='coerce').dt.strftime('%Y-%m-%d').fillna('')
                 ctr_lista = [""] + sorted(df_p['CTR'].unique().tolist())
                 ctr_sel = st.selectbox("Selecione a CTR para Alteração", ctr_lista, key="ctr_alteracao")
@@ -371,7 +367,6 @@ if login():
                                     df_save = df_p.drop(columns=['Data_Entrega_Str'])
                                     conn.update(worksheet="Pedidos", data=df_save)
                                     df_alt = conn.read(worksheet="Alteracoes", ttl=0)
-                                    # Grava Nome Real na Auditoria de Lote
                                     logs = [{"Data": datetime.now().strftime("%d/%m/%Y %H:%M"), "Pedido": df_p[df_p['ID_Item']==id]['Pedido'].iloc[0], "CTR": ctr_sel, "Usuario": st.session_state.user_display, "O que mudou": f"LOTE: Data {nova_data} / Gestor {novo_gestor}. Motivo: {motivo}"} for id in selecionados]
                                     conn.update(worksheet="Alteracoes", data=pd.concat([df_alt, pd.DataFrame(logs)], ignore_index=True))
                                     st.success("Atualizados!"); disparar_foguete(); time.sleep(1); st.rerun()
@@ -396,7 +391,7 @@ if login():
     elif menu == "🚨 Auditoria":
         st.header("🚨 Auditoria")
         try:
-            df_aud = conn.read(worksheet="Alteracoes", ttl=0)
+            df_aud = conn.read(worksheet="Alteracoes", ttl="1m")
             st.table(df_aud)
         except Exception as e: st.error(f"Erro na auditoria: {e}")
 
