@@ -87,6 +87,7 @@ def login():
             user = st.text_input("Usuário")
             password = st.text_input("Senha", type="password")
             if st.button("Entrar"):
+                # 1. Validação Master via Secrets
                 if user == st.secrets["credentials"]["master_user"] and \
                    password == st.secrets["credentials"]["master_password"]:
                     st.session_state.authenticated = True
@@ -94,10 +95,11 @@ def login():
                     st.session_state.user_display = "Administrador (Master)" 
                     st.session_state.papel_real = "Gerência Geral"
                     st.rerun()
+                
+                # 2. Validação via Planilha Usuarios
                 else:
                     try:
                         temp_conn = st.connection("gsheets", type=GSheetsConnection)
-                        # Usando cache de 1 minuto para o login para evitar erro 429 na tela inicial
                         df_users = temp_conn.read(worksheet="Usuarios", ttl="1m")
                         df_users['Usuario'] = df_users['Usuario'].astype(str).str.strip()
                         df_users['Senha'] = df_users['Senha'].astype(str).str.strip()
@@ -122,7 +124,6 @@ def login():
 if login():
     conn = st.connection("gsheets", type=GSheetsConnection)
 
-    # Função otimizada para atualizar status (lê com ttl=0 para garantir precisão na escrita)
     def atualizar_status_lote(lista_ids, novo_status):
         df_pedidos = conn.read(worksheet="Pedidos", ttl=0)
         df_pedidos.loc[df_pedidos['ID_Item'].isin(lista_ids), 'Status_Atual'] = novo_status
@@ -144,29 +145,35 @@ if login():
 
     st.sidebar.markdown("---")
     
-    menu = st.sidebar.radio("Navegação", 
-        [
-            "📊 Resumo e Prazos (Itens)", 
-            "📉 Monitor por Pedido (CTR)", 
-            "📦 Gestão por Pedido",
-            "🚨 Auditoria", 
-            "📥 Importar Itens (Sistema)",
-            "✅ Gate 1: Aceite Técnico", 
-            "🏭 Gate 2: Produção", 
-            "💰 Gate 3: Material", 
-            "🚛 Gate 4: Entrega",
-            "👤 Cadastro de Gestores",
-            "⚠️ Alteração de Pedido"
-        ])
+    # --- LÓGICA DE FILTRO DO MENU POR PAPEL ---
+    opcoes_menu = [
+        "📊 Resumo e Prazos (Itens)", 
+        "📉 Monitor por Pedido (CTR)", 
+        "📦 Gestão por Pedido",
+        "🚨 Auditoria", 
+        "📥 Importar Itens (Sistema)",
+        "✅ Gate 1: Aceite Técnico", 
+        "🏭 Gate 2: Produção", 
+        "💰 Gate 3: Material", 
+        "🚛 Gate 4: Entrega",
+        "👤 Cadastro de Gestores",
+        "⚠️ Alteração de Pedido"
+    ]
 
-    # --- FUNÇÃO DE GESTÃO DE GATES (Otimizada para Cota) ---
+    # Melhoria: Se o papel for "Dono do Pedido (DP)", removemos a Auditoria da lista
+    if papel_usuario == "Dono do Pedido (DP)":
+        if "🚨 Auditoria" in opcoes_menu:
+            opcoes_menu.remove("🚨 Auditoria")
+
+    menu = st.sidebar.radio("Navegação", opcoes_menu)
+
+    # --- FUNÇÃO DE GESTÃO DE GATES ---
     def checklist_gate(gate_id, aba, itens_checklist, responsavel_r, executor_e, msg_bloqueio, proximo_status, objetivo, momento):
         st.header(f"Ficha de Controle: {gate_id}")
         st.markdown(f"**Objetivo:** {objetivo} | **Momento:** {momento}")
         st.info(f"⚖️ **R:** {responsavel_r} | 🔨 **E:** {executor_e}")
         
         try:
-            # Usando cache de 2 minutos para navegação de gates
             df_pedidos = conn.read(worksheet="Pedidos", ttl="2m")
             status_requerido = "Aguardando Gate 1" if gate_id == "GATE 1" else \
                                "Aguardando Produção (G2)" if gate_id == "GATE 2" else \
@@ -221,7 +228,6 @@ if login():
     if menu == "📊 Resumo e Prazos (Itens)":
         st.header("🚦 Monitor de Produção (Itens)")
         try:
-            # TTL de 5 minutos para o dashboard principal
             df_p = conn.read(worksheet="Pedidos", ttl="5m")
             df_p['Data_Entrega'] = pd.to_datetime(df_p['Data_Entrega'], errors='coerce')
             for idx, row in df_p.sort_values(by='Data_Entrega', na_position='last').iterrows():
@@ -275,7 +281,6 @@ if login():
         if papel_usuario == "Consulta":
             st.warning("Seu acesso é apenas de consulta. Alterações desabilitadas.")
         try:
-            # Para gestão, ttl menor para ver mudanças rápidas
             df_p = conn.read(worksheet="Pedidos", ttl="1m")
             df_p['Data_Entrega_Raw'] = df_p['Data_Entrega']
             df_p['Data_Entrega'] = pd.to_datetime(df_p['Data_Entrega'], errors='coerce').dt.strftime('%Y-%m-%d').fillna('')
@@ -300,7 +305,7 @@ if login():
                                 df_save = df_p.drop(columns=['Data_Entrega_Raw'])
                                 conn.update(worksheet="Pedidos", data=df_save)
                                 
-                                # AUDITORIA AUTOMÁTICA GESTÃO INDIVIDUAL
+                                # REGISTRO DE AUDITORIA AUTOMÁTICO NA GESTÃO INDIVIDUAL
                                 df_alt = conn.read(worksheet="Alteracoes", ttl=0)
                                 log = pd.DataFrame([{
                                     "Data": datetime.now().strftime("%d/%m/%Y %H:%M"), 
