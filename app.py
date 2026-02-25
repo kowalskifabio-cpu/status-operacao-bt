@@ -136,14 +136,28 @@ if login():
 
     st.sidebar.markdown("---")
     
-    opcoes_menu = ["📊 Resumo e Prazos (Itens)", "📈 Indicadores de Performance", "📉 Monitor por Pedido (CTR)", "🚨 Auditoria", "📥 Importar Itens (Sistema)", "✅ Gate 1: Aceite Técnico", "🏭 Gate 2: Produção", "💰 Gate 3: Material", "🚛 Gate 4: Entrega", "⚠️ Alteração de Pedido"]
+    # --- SEQUÊNCIA DO MENU SOLICITADA ---
+    opcoes_menu = [
+        "📉 Monitor por Pedido (CTR)", 
+        "📊 Resumo e Prazos (Itens)", 
+        "📈 Indicadores de Performance", 
+        "🚨 Auditoria", 
+        "✅ Gate 1: Aceite Técnico", 
+        "🏭 Gate 2: Produção", 
+        "💰 Gate 3: Material", 
+        "🚛 Gate 4: Entrega", 
+        "⚠️ Alteração de Pedido",
+        "📥 Importar Itens (Sistema)"
+    ]
+
+    # Filtro de permissão: Se o papel for "Dono do Pedido (DP)", removemos Auditoria e Indicadores
     if papel_usuario == "Dono do Pedido (DP)":
         if "🚨 Auditoria" in opcoes_menu: opcoes_menu.remove("🚨 Auditoria")
         if "📈 Indicadores de Performance" in opcoes_menu: opcoes_menu.remove("📈 Indicadores de Performance")
         
     menu = st.sidebar.radio("Navegação", opcoes_menu)
 
-    # --- FUNÇÃO DE GESTÃO DE GATES (CORRIGIDA) ---
+    # --- FUNÇÃO DE GESTÃO DE GATES ---
     def checklist_gate(gate_id, aba, itens_checklist, responsavel_r, executor_e, msg_bloqueio, proximo_status, objetivo, momento):
         st.header(f"Ficha de Controle: {gate_id}")
         st.markdown(f"**Objetivo:** {objetivo} | **Momento:** {momento}")
@@ -176,7 +190,6 @@ if login():
                         for secao, itens in itens_checklist.items():
                             st.markdown(f"#### 🔹 {secao}")
                             for item in itens: 
-                                # CHAVE ÚNICA PARA EVITAR ERRO DE ID REPETIDO
                                 respostas[item] = st.checkbox(item, key=f"chk_{gate_id}_{aba}_{item.replace(' ', '_')}")
                         
                         obs = st.text_area("Observações Técnicas")
@@ -211,27 +224,7 @@ if login():
 
     # --- PÁGINAS ---
 
-    if menu == "📊 Resumo e Prazos (Itens)":
-        st.header("🚦 Monitor de Produção (Itens)")
-        try:
-            df_p = conn.read(worksheet="Pedidos", ttl="5m")
-            df_p['Data_Entrega'] = pd.to_datetime(df_p['Data_Entrega'], errors='coerce')
-            for idx, row in df_p.sort_values(by='Data_Entrega', na_position='last').iterrows():
-                dias = (row['Data_Entrega'].date() - date.today()).days if pd.notnull(row['Data_Entrega']) else None
-                status_html = ""
-                if dias is None: status_html = '<span style="color: grey;">⚪ SEM DATA</span>'
-                elif dias < 0: status_html = f'<div class="alerta-pulsante">❌ ATRASADO ({abs(dias)}d)</div>'
-                elif dias <= 3: status_html = f'<div class="alerta-pulsante">🔴 URGENTE ({dias}d)</div>'
-                else: status_html = '<div class="no-prazo">🟢 NO PRAZO</div>'
-                c1, c2, c3, c4 = st.columns([2, 4, 2, 2])
-                with c1: st.write(f"**{row['CTR']}**")
-                with c2: st.write(f"**{row['Pedido']}**\n👤 {row['Dono']}")
-                with c3: st.write(f"📍 {row['Status_Atual']}\n📅 {row['Data_Entrega'].strftime('%d/%m/%Y') if pd.notnull(row['Data_Entrega']) else 'S/D'}")
-                with c4: st.markdown(status_html, unsafe_allow_html=True)
-                st.markdown("---")
-        except Exception as e: st.error(f"Erro no monitor: {e}")
-
-    elif menu == "📉 Monitor por Pedido (CTR)":
+    if menu == "📉 Monitor por Pedido (CTR)":
         st.header("📉 Monitor de Produção por CTR")
         try:
             df_p = conn.read(worksheet="Pedidos", ttl="5m")
@@ -260,6 +253,26 @@ if login():
                     c3.markdown(status_html, unsafe_allow_html=True)
                     st.markdown("---")
         except Exception as e: st.error(f"Erro no monitor por pedido: {e}")
+
+    elif menu == "📊 Resumo e Prazos (Itens)":
+        st.header("🚦 Monitor de Produção (Itens)")
+        try:
+            df_p = conn.read(worksheet="Pedidos", ttl="5m")
+            df_p['Data_Entrega'] = pd.to_datetime(df_p['Data_Entrega'], errors='coerce')
+            for idx, row in df_p.sort_values(by='Data_Entrega', na_position='last').iterrows():
+                dias = (row['Data_Entrega'].date() - date.today()).days if pd.notnull(row['Data_Entrega']) else None
+                status_html = ""
+                if dias is None: status_html = '<span style="color: grey;">⚪ SEM DATA</span>'
+                elif dias < 0: status_html = f'<div class="alerta-pulsante">❌ ATRASADO ({abs(dias)}d)</div>'
+                elif dias <= 3: status_html = f'<div class="alerta-pulsante">🔴 URGENTE ({dias}d)</div>'
+                else: status_html = '<div class="no-prazo">🟢 NO PRAZO</div>'
+                c1, c2, c3, c4 = st.columns([2, 4, 2, 2])
+                with c1: st.write(f"**{row['CTR']}**")
+                with c2: st.write(f"**{row['Pedido']}**\n👤 {row['Dono']}")
+                with c3: st.write(f"📍 {row['Status_Atual']}\n📅 {row['Data_Entrega'].strftime('%d/%m/%Y') if pd.notnull(row['Data_Entrega']) else 'S/D'}")
+                with c4: st.markdown(status_html, unsafe_allow_html=True)
+                st.markdown("---")
+        except Exception as e: st.error(f"Erro no monitor: {e}")
 
     elif menu == "📈 Indicadores de Performance":
         st.header("📈 Dashboard de Indicadores")
@@ -305,25 +318,30 @@ if login():
             m6.metric("Total de Itens Alterados", f"{len(alterados_ids)}")
         except Exception as e: st.error(f"Erro nos indicadores: {e}")
 
-    elif menu == "📥 Importar Itens (Sistema)":
-        st.header("📥 Importar Itens da Marcenaria")
-        if papel_usuario not in ["Gerência Geral", "PCP"]: st.error("Apenas PCP ou Gerência podem importar novos dados.")
-        else:
-            up = st.file_uploader("Arquivo egsDataGrid", type=["csv", "xlsx"])
-            if up:
-                try:
-                    df_up = pd.read_csv(up) if up.name.endswith('csv') else pd.read_excel(up)
-                    if st.button("Confirmar Importação"):
-                        df_base = conn.read(worksheet="Pedidos", ttl=0)
-                        novos = []
-                        for _, r in df_up.iterrows():
-                            uid = f"{r['Centro de custo']}-{r['Id Programação']}"
-                            dt_crua = pd.to_datetime(r['Data Entrega'], errors='coerce')
-                            dt_limpa = dt_crua.strftime('%Y-%m-%d') if pd.notnull(dt_crua) else ""
-                            if uid not in df_base['ID_Item'].astype(str).values:
-                                novos.append({"ID_Item": uid, "CTR": r['Centro de custo'], "Obra": r['Obra'], "Item": r['Item'], "Pedido": r['Produto'], "Dono": r['Gestor'], "Status_Atual": "Aguardando Gate 1", "Data_Entrega": dt_limpa, "Quantidade": r['Quantidade'], "Unidade": r['Unidade']})
-                        if novos: conn.update(worksheet="Pedidos", data=pd.concat([df_base, pd.DataFrame(novos)], ignore_index=True)); st.success("Importado!")
-                except Exception as e: st.error(f"Erro na importação: {e}")
+    elif menu == "🚨 Auditoria":
+        st.header("🚨 Auditoria")
+        try:
+            df_aud = conn.read(worksheet="Alteracoes", ttl="1m")
+            df_aud['temp_date'] = pd.to_datetime(df_aud['Data'], format="%d/%m/%Y %H:%M", errors='coerce')
+            df_aud = df_aud.sort_values(by='temp_date', ascending=False).drop(columns=['temp_date'])
+            st.table(df_aud)
+        except Exception as e: st.error(f"Erro na auditoria: {e}")
+
+    elif menu == "✅ Gate 1: Aceite Técnico":
+        itens = {"Informações Comerciais": ["Pedido registrado", "Cliente identificado", "Tipo de obra definido", "Responsável identificado"], "Escopo Técnico": ["Projeto mínimo recebido", "Ambientes definidos", "Materiais principais", "Itens fora do padrão"], "Prazo (prévia)": ["Prazo solicitado registrado", "Prazo avaliado", "Risco de prazo"], "Governança": ["Dono do Pedido definido", "PCP validou viabilidade", "Aprovado formalmente"]}
+        checklist_gate("GATE 1", "Checklist_G1", itens, "Dono do Pedido (DP)", "PCP", "Projeto incompleto ➡️ BLOQUEADO", "Aguardando Produção (G2)", "Impedir entrada mal definida", "Antes do plano")
+
+    elif menu == "🏭 Gate 2: Produção":
+        itens = {"Planejamento": ["Sequenciado", "Capacidade validada", "Gargalo identificado", "Gargalo protegido"], "Projeto": ["Projeto técnico liberado", "Medidas conferidas", "Versão registrada"], "Comunicação": ["Produção ciente", "Prazo interno registrado", "Alterações registradas"]}
+        checklist_gate("GATE 2", "Checklist_G2", itens, "PCP", "Produção", "Sem plano ➡️ BLOQUEADO", "Aguardando Materiais (G3)", "Produzir planejado", "No corte")
+
+    elif menu == "💰 Gate 3: Material":
+        itens = {"Materiais": ["Lista validada", "Quantidades conferidas", "Materiais especiais"], "Compras": ["Fornecedores definidos", "Lead times confirmados", "Datas registradas"], "Financeiro": ["Impacto caixa validado", "Compra autorizada", "Forma de pagamento"]}
+        checklist_gate("GATE 3", "Checklist_G3", itens, "Financeiro", "Compras", "Falta material ➡️ PARADO", "Aguardando Entrega (G4)", "Fábrica sem parada", "Na montagem")
+
+    elif menu == "🚛 Gate 4: Entrega":
+        itens = {"Produto": ["Produção concluída", "Qualidade conferida", "Separados por pedido"], "Logística": ["Checklist carga", "Frota definida", "Rota planejada"], "Prazo": ["Data validada", "Cliente informado", "Equipe montagem alinhada"]}
+        checklist_gate("GATE 4", "Checklist_G4", itens, "Dono do Pedido (DP)", "Logística", "Erro acabamento ➡️ NÃO carrega", "CONCLUÍDO ✅", "Entrega perfeita", "Na carga")
 
     elif menu == "⚠️ Alteração de Pedido":
         st.header("🔄 Alteração de Pedido em Lote")
@@ -339,7 +357,6 @@ if login():
                     selecionados = st.multiselect("Selecione os itens:", options=itens_da_ctr['ID_Item'].tolist(), format_func=lambda x: f"{itens_da_ctr[itens_da_ctr['ID_Item'] == x]['Pedido'].iloc[0]}", default=itens_da_ctr['ID_Item'].tolist())
                     if selecionados:
                         with st.form("form_alteracao_lote"):
-                            st.info(f"Alterando {len(selecionados)} itens")
                             col1, col2 = st.columns(2)
                             gestor_atual = itens_da_ctr[itens_da_ctr['ID_Item'] == selecionados[0]]['Dono'].iloc[0]
                             novo_gestor = col1.text_input("Novo Gestor", value=gestor_atual)
@@ -365,28 +382,22 @@ if login():
                                     st.success("Atualizados!"); disparar_foguete(); time.sleep(1); st.rerun()
             except Exception as e: st.error(f"Erro: {e}")
 
-    elif menu == "🚨 Auditoria":
-        st.header("🚨 Auditoria")
-        try:
-            df_aud = conn.read(worksheet="Alteracoes", ttl="1m")
-            df_aud['temp_date'] = pd.to_datetime(df_aud['Data'], format="%d/%m/%Y %H:%M", errors='coerce')
-            df_aud = df_aud.sort_values(by='temp_date', ascending=False).drop(columns=['temp_date'])
-            st.table(df_aud)
-        except Exception as e: st.error(f"Erro na auditoria: {e}")
-
-    # --- EXECUÇÃO DOS GATES ---
-    elif menu == "✅ Gate 1: Aceite Técnico":
-        itens = {"Informações Comerciais": ["Pedido registrado", "Cliente identificado", "Tipo de obra definido", "Responsável identificado"], "Escopo Técnico": ["Projeto mínimo recebido", "Ambientes definidos", "Materiais principais", "Itens fora do padrão"], "Prazo (prévia)": ["Prazo solicitado registrado", "Prazo avaliado", "Risco de prazo"], "Governança": ["Dono do Pedido definido", "PCP validou viabilidade", "Aprovado formalmente"]}
-        checklist_gate("GATE 1", "Checklist_G1", itens, "Dono do Pedido (DP)", "PCP", "Projeto incompleto ➡️ BLOQUEADO", "Aguardando Produção (G2)", "Impedir entrada mal definida", "Antes do plano")
-
-    elif menu == "🏭 Gate 2: Produção":
-        itens = {"Planejamento": ["Sequenciado", "Capacidade validada", "Gargalo identificado", "Gargalo protegido"], "Projeto": ["Projeto técnico liberado", "Medidas conferidas", "Versão registrada"], "Comunicação": ["Produção ciente", "Prazo interno registrado", "Alterações registradas"]}
-        checklist_gate("GATE 2", "Checklist_G2", itens, "PCP", "Produção", "Sem plano ➡️ BLOQUEADO", "Aguardando Materiais (G3)", "Produzir planejado", "No corte")
-
-    elif menu == "💰 Gate 3: Material":
-        itens = {"Materiais": ["Lista validada", "Quantidades conferidas", "Materiais especiais"], "Compras": ["Fornecedores definidos", "Lead times confirmados", "Datas registradas"], "Financeiro": ["Impacto caixa validado", "Compra autorizada", "Forma de pagamento"]}
-        checklist_gate("GATE 3", "Checklist_G3", itens, "Financeiro", "Compras", "Falta material ➡️ PARADO", "Aguardando Entrega (G4)", "Fábrica sem parada", "Na montagem")
-
-    elif menu == "🚛 Gate 4: Entrega":
-        itens = {"Produto": ["Produção concluída", "Qualidade conferida", "Separados por pedido"], "Logística": ["Checklist carga", "Frota definida", "Rota planejada"], "Prazo": ["Data validada", "Cliente informado", "Equipe montagem alinhada"]}
-        checklist_gate("GATE 4", "Checklist_G4", itens, "Dono do Pedido (DP)", "Logística", "Erro acabamento ➡️ NÃO carrega", "CONCLUÍDO ✅", "Entrega perfeita", "Na carga")
+    elif menu == "📥 Importar Itens (Sistema)":
+        st.header("📥 Importar Itens da Marcenaria")
+        if papel_usuario not in ["Gerência Geral", "PCP"]: st.error("Apenas PCP ou Gerência podem importar novos dados.")
+        else:
+            up = st.file_uploader("Arquivo egsDataGrid", type=["csv", "xlsx"])
+            if up:
+                try:
+                    df_up = pd.read_csv(up) if up.name.endswith('csv') else pd.read_excel(up)
+                    if st.button("Confirmar Importação"):
+                        df_base = conn.read(worksheet="Pedidos", ttl=0)
+                        novos = []
+                        for _, r in df_up.iterrows():
+                            uid = f"{r['Centro de custo']}-{r['Id Programação']}"
+                            dt_crua = pd.to_datetime(r['Data Entrega'], errors='coerce')
+                            dt_limpa = dt_crua.strftime('%Y-%m-%d') if pd.notnull(dt_crua) else ""
+                            if uid not in df_base['ID_Item'].astype(str).values:
+                                novos.append({"ID_Item": uid, "CTR": r['Centro de custo'], "Obra": r['Obra'], "Item": r['Item'], "Pedido": r['Produto'], "Dono": r['Gestor'], "Status_Atual": "Aguardando Gate 1", "Data_Entrega": dt_limpa, "Quantidade": r['Quantidade'], "Unidade": r['Unidade']})
+                        if novos: conn.update(worksheet="Pedidos", data=pd.concat([df_base, pd.DataFrame(novos)], ignore_index=True)); st.success("Importado!")
+                except Exception as e: st.error(f"Erro na importação: {e}")
