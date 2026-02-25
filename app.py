@@ -75,7 +75,7 @@ st.markdown("""
 def disparar_foguete():
     st.markdown('<div class="rocket-container">🚀</div>', unsafe_allow_html=True)
 
-# --- SISTEMA DE LOGIN HÍBRIDO COM NOME REAL ---
+# --- SISTEMA DE LOGIN HÍBRIDO ---
 def login():
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
@@ -87,7 +87,6 @@ def login():
             user = st.text_input("Usuário")
             password = st.text_input("Senha", type="password")
             if st.button("Entrar"):
-                # 1. Validação Master via Secrets
                 if user == st.secrets["credentials"]["master_user"] and \
                    password == st.secrets["credentials"]["master_password"]:
                     st.session_state.authenticated = True
@@ -95,17 +94,13 @@ def login():
                     st.session_state.user_display = "Administrador (Master)" 
                     st.session_state.papel_real = "Gerência Geral"
                     st.rerun()
-                
-                # 2. Validação via Planilha Usuarios
                 else:
                     try:
                         temp_conn = st.connection("gsheets", type=GSheetsConnection)
                         df_users = temp_conn.read(worksheet="Usuarios", ttl="1m")
                         df_users['Usuario'] = df_users['Usuario'].astype(str).str.strip()
                         df_users['Senha'] = df_users['Senha'].astype(str).str.strip()
-                        
                         user_match = df_users[(df_users['Usuario'] == user) & (df_users['Senha'] == password)]
-                        
                         if not user_match.empty:
                             st.session_state.authenticated = True
                             st.session_state.user_role = "USER"
@@ -113,18 +108,14 @@ def login():
                             st.session_state.user_display = nome_na_tabela if pd.notnull(nome_na_tabela) else user
                             st.session_state.papel_real = user_match['Papel'].iloc[0]
                             st.rerun()
-                        else:
-                            st.error("Usuário ou senha inválidos")
-                    except Exception as e:
-                        st.error(f"Erro ao conectar com tabela de usuários: {e}")
+                        else: st.error("Usuário ou senha inválidos")
+                    except Exception as e: st.error(f"Erro ao conectar com tabela de usuários: {e}")
         return False
     return True
 
-# --- INÍCIO DA APLICAÇÃO PROTEGIDA ---
 if login():
     conn = st.connection("gsheets", type=GSheetsConnection)
 
-    # Função otimizada para atualizar status
     def atualizar_status_lote(lista_ids, novo_status):
         df_pedidos = conn.read(worksheet="Pedidos", ttl=0)
         df_pedidos.loc[df_pedidos['ID_Item'].isin(lista_ids), 'Status_Atual'] = novo_status
@@ -133,8 +124,7 @@ if login():
     # --- MENU LATERAL ---
     if os.path.exists("Status Apresentação.png"):
         st.sidebar.image("Status Apresentação.png", use_container_width=True)
-    else:
-        st.sidebar.title("STATUS MARCENARIA")
+    else: st.sidebar.title("STATUS MARCENARIA")
 
     st.sidebar.markdown(f"**👤 {st.session_state.user_display}**")
     papel_usuario = st.session_state.papel_real
@@ -146,24 +136,9 @@ if login():
 
     st.sidebar.markdown("---")
     
-    # --- LISTA DE OPÇÕES DO MENU (Removido Cadastro de Gestores conforme solicitado) ---
-    opcoes_menu = [
-        "📊 Resumo e Prazos (Itens)", 
-        "📉 Monitor por Pedido (CTR)", 
-        "🚨 Auditoria", 
-        "📥 Importar Itens (Sistema)",
-        "✅ Gate 1: Aceite Técnico", 
-        "🏭 Gate 2: Produção", 
-        "💰 Gate 3: Material", 
-        "🚛 Gate 4: Entrega",
-        "⚠️ Alteração de Pedido"
-    ]
-
-    # Filtro: Se o papel for "Dono do Pedido (DP)", removemos a Auditoria
+    opcoes_menu = ["📊 Resumo e Prazos (Itens)", "📉 Monitor por Pedido (CTR)", "🚨 Auditoria", "📥 Importar Itens (Sistema)", "✅ Gate 1: Aceite Técnico", "🏭 Gate 2: Produção", "💰 Gate 3: Material", "🚛 Gate 4: Entrega", "⚠️ Alteração de Pedido"]
     if papel_usuario == "Dono do Pedido (DP)":
-        if "🚨 Auditoria" in opcoes_menu:
-            opcoes_menu.remove("🚨 Auditoria")
-
+        if "🚨 Auditoria" in opcoes_menu: opcoes_menu.remove("🚨 Auditoria")
     menu = st.sidebar.radio("Navegação", opcoes_menu)
 
     # --- FUNÇÃO DE GESTÃO DE GATES ---
@@ -188,13 +163,7 @@ if login():
                     st.success(f"Não há itens pendentes para o {gate_id} nesta CTR.")
                     return
 
-                selecionados = st.multiselect(
-                    "Itens disponíveis:",
-                    options=itens_pendentes['ID_Item'].tolist(),
-                    format_func=lambda x: itens_pendentes[itens_pendentes['ID_Item'] == x]['Pedido'].iloc[0],
-                    default=itens_pendentes['ID_Item'].tolist(),
-                    key=f"multi_{aba}"
-                )
+                selecionados = st.multiselect("Itens disponíveis:", options=itens_pendentes['ID_Item'].tolist(), format_func=lambda x: itens_pendentes[itens_pendentes['ID_Item'] == x]['Pedido'].iloc[0], default=itens_pendentes['ID_Item'].tolist(), key=f"multi_{aba}")
                 
                 if selecionados:
                     pode_assinar = (papel_usuario == responsavel_r or papel_usuario == executor_e or papel_usuario == "Gerência Geral")
@@ -213,10 +182,29 @@ if login():
                             else:
                                 df_gate = conn.read(worksheet=aba, ttl=0)
                                 novas_linhas = []
+                                logs_auditoria = []
                                 for id_item in selecionados:
+                                    # Dados para a aba do Gate
                                     nova = {"Data": datetime.now().strftime("%d/%m/%Y %H:%M"), "ID_Item": id_item, "Validado_Por": st.session_state.user_display, "Obs": obs}
                                     nova.update(respostas); novas_linhas.append(nova)
+                                    
+                                    # Preparação para Auditoria (Melhoria Solicitada)
+                                    item_nome = itens_pendentes[itens_pendentes['ID_Item'] == id_item]['Pedido'].iloc[0]
+                                    logs_auditoria.append({
+                                        "Data": datetime.now().strftime("%d/%m/%Y %H:%M"),
+                                        "Pedido": item_nome,
+                                        "Usuario": st.session_state.user_display,
+                                        "O que mudou": f"GATE: Avanço para {proximo_status}. Obs: {obs}",
+                                        "Impacto no Prazo": "Não",
+                                        "Impacto Financeiro": "Não",
+                                        "CTR": ctr_sel
+                                    })
+                                
+                                # Atualiza Aba do Gate e Auditoria
                                 conn.update(worksheet=aba, data=pd.concat([df_gate, pd.DataFrame(novas_linhas)], ignore_index=True))
+                                df_alt = conn.read(worksheet="Alteracoes", ttl=0)
+                                conn.update(worksheet="Alteracoes", data=pd.concat([df_alt, pd.DataFrame(logs_auditoria)], ignore_index=True))
+                                
                                 atualizar_status_lote(selecionados, proximo_status)
                                 st.success(f"🚀 {len(selecionados)} itens validados!")
                                 disparar_foguete(); time.sleep(1); st.rerun()
@@ -236,7 +224,6 @@ if login():
                 elif dias < 0: status_html = f'<div class="alerta-pulsante">❌ ATRASADO ({abs(dias)}d)</div>'
                 elif dias <= 3: status_html = f'<div class="alerta-pulsante">🔴 URGENTE ({dias}d)</div>'
                 else: status_html = '<div class="no-prazo">🟢 NO PRAZO</div>'
-
                 c1, c2, c3, c4 = st.columns([2, 4, 2, 2])
                 with c1: st.write(f"**{row['CTR']}**")
                 with c2: st.write(f"**{row['Pedido']}**\n👤 {row['Dono']}")
@@ -277,8 +264,7 @@ if login():
 
     elif menu == "📥 Importar Itens (Sistema)":
         st.header("📥 Importar Itens da Marcenaria")
-        if papel_usuario not in ["Gerência Geral", "PCP"]:
-            st.error("Apenas PCP ou Gerência podem importar novos dados.")
+        if papel_usuario not in ["Gerência Geral", "PCP"]: st.error("Apenas PCP ou Gerência podem importar novos dados.")
         else:
             up = st.file_uploader("Arquivo egsDataGrid", type=["csv", "xlsx"])
             if up:
@@ -298,8 +284,7 @@ if login():
 
     elif menu == "⚠️ Alteração de Pedido":
         st.header("🔄 Alteração de Pedido em Lote")
-        if papel_usuario not in ["Gerência Geral", "PCP"]:
-            st.error("Acesso negado para esta função.")
+        if papel_usuario not in ["Gerência Geral", "PCP"]: st.error("Acesso negado.")
         else:
             try:
                 df_p = conn.read(worksheet="Pedidos", ttl="1m")
@@ -319,7 +304,13 @@ if login():
                             try: data_sug = datetime.strptime(data_at, '%Y-%m-%d').date() if data_at else date.today()
                             except: data_sug = date.today()
                             nova_data = col2.date_input("Nova Data", value=data_sug)
-                            motivo = st.text_area("Motivo")
+                            
+                            st.markdown("#### ⚖️ Impactos da Alteração")
+                            c_imp1, c_imp2 = st.columns(2)
+                            imp_prazo = c_imp1.radio("Impacto no Prazo?", ["Não", "Sim"], horizontal=True)
+                            imp_financeiro = c_imp2.radio("Impacto Financeiro?", ["Não", "Sim"], horizontal=True)
+                            
+                            motivo = st.text_area("Motivo da Alteração")
                             if st.form_submit_button("APLICAR ALTERAÇÕES EM LOTE 🚀"):
                                 if not motivo: st.error("❌ Descreva o motivo")
                                 else:
@@ -328,11 +319,22 @@ if login():
                                     df_save = df_p.drop(columns=['Data_Entrega_Str'])
                                     conn.update(worksheet="Pedidos", data=df_save)
                                     df_alt = conn.read(worksheet="Alteracoes", ttl=0)
-                                    logs = [{"Data": datetime.now().strftime("%d/%m/%Y %H:%M"), "Pedido": df_p[df_p['ID_Item']==id]['Pedido'].iloc[0], "CTR": ctr_sel, "Usuario": st.session_state.user_display, "O que mudou": f"LOTE: Data {nova_data} / Gestor {novo_gestor}. Motivo: {motivo}"} for id in selecionados]
+                                    logs = [{"Data": datetime.now().strftime("%d/%m/%Y %H:%M"), "Pedido": df_p[df_p['ID_Item']==id]['Pedido'].iloc[0], "CTR": ctr_sel, "Usuario": st.session_state.user_display, "O que mudou": f"LOTE: Data {nova_data} / Gestor {novo_gestor}. Motivo: {motivo}", "Impacto no Prazo": imp_prazo, "Impacto Financeiro": imp_financeiro} for id in selecionados]
                                     conn.update(worksheet="Alteracoes", data=pd.concat([df_alt, pd.DataFrame(logs)], ignore_index=True))
                                     st.success("Atualizados!"); disparar_foguete(); time.sleep(1); st.rerun()
             except Exception as e: st.error(f"Erro: {e}")
 
+    elif menu == "🚨 Auditoria":
+        st.header("🚨 Auditoria")
+        try:
+            df_aud = conn.read(worksheet="Alteracoes", ttl="1m")
+            # Ordena pela data mais recente (precisa converter para datetime para ordenar corretamente)
+            df_aud['temp_date'] = pd.to_datetime(df_aud['Data'], format="%d/%m/%Y %H:%M", errors='coerce')
+            df_aud = df_aud.sort_values(by='temp_date', ascending=False).drop(columns=['temp_date'])
+            st.table(df_aud)
+        except Exception as e: st.error(f"Erro na auditoria: {e}")
+
+    # --- GATES MANTIDOS ---
     elif menu == "✅ Gate 1: Aceite Técnico":
         itens = {"Informações Comerciais": ["Pedido registrado", "Cliente identificado", "Tipo de obra definido", "Responsável identificado"], "Escopo Técnico": ["Projeto mínimo recebido", "Ambientes definidos", "Materiais principais", "Itens fora do padrão"], "Prazo (prévia)": ["Prazo solicitado registrado", "Prazo avaliado", "Risco de prazo"], "Governança": ["Dono do Pedido definido", "PCP validou viabilidade", "Aprovado formalmente"]}
         checklist_gate("GATE 1", "Checklist_G1", itens, "Dono do Pedido (DP)", "PCP", "Projeto incompleto ➡️ BLOQUEADO", "Aguardando Produção (G2)", "Impedir entrada mal definida", "Antes do plano")
@@ -342,16 +344,9 @@ if login():
         checklist_gate("GATE 2", "Checklist_G2", itens, "PCP", "Produção", "Sem plano ➡️ BLOQUEADO", "Aguardando Materiais (G3)", "Produzir planejado", "No corte")
 
     elif menu == "💰 Gate 3: Material":
-        itens = {"Materiais": ["Lista validada", "Quantidades conferidas", "Materiais especiais"], "Compras": ["Fornecedores definidos", "Lead times confirmados", "Datas registradas"], "Financeiro": ["Impacto caixa validado", "Compra autorizada", "Forma de pagamento"]}
+        itens = {"Materiais": ["Lista validada", "Quantidades conferidas", "Materiais especiais"], "Compras": ["Fornecedores definidos", "Lead times confirmados", "Lead times confirmados", "Datas registradas"], "Financeiro": ["Impacto caixa validado", "Compra autorizada", "Forma de pagamento"]}
         checklist_gate("GATE 3", "Checklist_G3", itens, "Financeiro", "Compras", "Falta material ➡️ PARADO", "Aguardando Entrega (G4)", "Fábrica sem parada", "Na montagem")
 
     elif menu == "🚛 Gate 4: Entrega":
         itens = {"Produto": ["Produção concluída", "Qualidade conferida", "Separados por pedido"], "Logística": ["Checklist carga", "Frota definida", "Rota planejada"], "Prazo": ["Data validada", "Cliente informado", "Equipe montagem alinhada"]}
         checklist_gate("GATE 4", "Checklist_G4", itens, "Dono do Pedido (DP)", "Logística", "Erro acabamento ➡️ NÃO carrega", "CONCLUÍDO ✅", "Entrega perfeita", "Na carga")
-
-    elif menu == "🚨 Auditoria":
-        st.header("🚨 Auditoria")
-        try:
-            df_aud = conn.read(worksheet="Alteracoes", ttl="1m")
-            st.table(df_aud)
-        except Exception as e: st.error(f"Erro na auditoria: {e}")
