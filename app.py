@@ -120,6 +120,7 @@ if login():
         df_pedidos = conn.read(worksheet="Pedidos", ttl=0)
         df_pedidos.loc[df_pedidos['ID_Item'].isin(lista_ids), 'Status_Atual'] = novo_status
         conn.update(worksheet="Pedidos", data=df_pedidos)
+        st.cache_data.clear()
 
     # --- MENU LATERAL ---
     if os.path.exists("Status Apresentação.png"):
@@ -136,7 +137,6 @@ if login():
 
     st.sidebar.markdown("---")
     
-    # --- SEQUÊNCIA DO MENU SOLICITADA ---
     opcoes_menu = [
         "📉 Monitor por Pedido (CTR)", 
         "📊 Resumo e Prazos (Itens)", 
@@ -150,14 +150,12 @@ if login():
         "📥 Importar Itens (Sistema)"
     ]
 
-    # Filtro de permissão: Se o papel for "Dono do Pedido (DP)", removemos Auditoria e Indicadores
     if papel_usuario == "Dono do Pedido (DP)":
         if "🚨 Auditoria" in opcoes_menu: opcoes_menu.remove("🚨 Auditoria")
         if "📈 Indicadores de Performance" in opcoes_menu: opcoes_menu.remove("📈 Indicadores de Performance")
         
     menu = st.sidebar.radio("Navegação", opcoes_menu)
 
-    # --- FUNÇÃO DE GESTÃO DE GATES ---
     def checklist_gate(gate_id, aba, itens_checklist, responsavel_r, executor_e, msg_bloqueio, proximo_status, objetivo, momento):
         st.header(f"Ficha de Controle: {gate_id}")
         st.markdown(f"**Objetivo:** {objetivo} | **Momento:** {momento}")
@@ -227,7 +225,7 @@ if login():
     if menu == "📉 Monitor por Pedido (CTR)":
         st.header("📉 Monitor de Produção por CTR")
         try:
-            df_p = conn.read(worksheet="Pedidos", ttl="5m")
+            df_p = conn.read(worksheet="Pedidos", ttl="2m")
             df_p['Data_Entrega_DT'] = pd.to_datetime(df_p['Data_Entrega'], errors='coerce')
             ctrs = df_p.groupby('CTR').agg({'ID_Item': 'count', 'Data_Entrega_DT': 'min', 'Dono': 'first'}).reset_index()
             for _, row in ctrs.sort_values(by='Data_Entrega_DT').iterrows():
@@ -242,10 +240,11 @@ if login():
                     c2.markdown(f"👤 **Gestor:** {row['Dono']}")
                     with c2.popover(f"🔍 Detalhar Itens ({total_itens})", use_container_width=True):
                         for _, item in itens_obra.iterrows():
-                            i_dias = (pd.to_datetime(item['Data_Entrega']).date() - date.today()).days if pd.notnull(item['Data_Entrega']) else None
+                            i_dt = pd.to_datetime(item['Data_Entrega'], errors='coerce')
+                            i_dias = (i_dt.date() - date.today()).days if pd.notnull(i_dt) else None
                             cor = "#28a745" if i_dias is not None and i_dias > 3 else "#FF0000" if i_dias is not None else "grey"
                             circulo = f'<span class="semaforo" style="background-color: {cor};"></span>'
-                            st.markdown(f"{circulo} **{item['Pedido']}** | 📅 {pd.to_datetime(item['Data_Entrega']).strftime('%d/%m') if pd.notnull(item['Data_Entrega']) else 'S/D'}", unsafe_allow_html=True)
+                            st.markdown(f"{circulo} **{item['Pedido']}** | 📅 {i_dt.strftime('%d/%m') if pd.notnull(i_dt) else 'S/D'}", unsafe_allow_html=True)
                     if dias is None: status_html = '<span style="color: grey;">⚪ SEM DATA</span>'
                     elif dias < 0: status_html = f'<div class="alerta-pulsante">❌ ATRASO CRÍTICO</div>'
                     elif dias <= 3: status_html = f'<div class="alerta-pulsante">🔴 URGENTE</div>'
@@ -257,7 +256,7 @@ if login():
     elif menu == "📊 Resumo e Prazos (Itens)":
         st.header("🚦 Monitor de Produção (Itens)")
         try:
-            df_p = conn.read(worksheet="Pedidos", ttl="5m")
+            df_p = conn.read(worksheet="Pedidos", ttl="2m")
             df_p['Data_Entrega'] = pd.to_datetime(df_p['Data_Entrega'], errors='coerce')
             for idx, row in df_p.sort_values(by='Data_Entrega', na_position='last').iterrows():
                 dias = (row['Data_Entrega'].date() - date.today()).days if pd.notnull(row['Data_Entrega']) else None
@@ -305,17 +304,11 @@ if login():
             alterados_ids = df_aud_f[df_aud_f['O que mudou'].str.contains("LOTE:", na=False)]['Pedido'].unique()
             com_imp_financeiro = len(df_aud_f[df_aud_f['Impacto Financeiro'] == "Sim"])
             com_imp_prazo = len(df_aud_f[df_aud_f['Impacto no Prazo'] == "Sim"])
-            passaram_limpos = len(itens_mes) - len(alterados_ids)
             
             m1, m2, m3 = st.columns(3)
             m1.metric("No Prazo", f"{no_prazo}")
             m2.metric("Atrasados", f"{atrasados}", delta_color="inverse")
-            m3.metric("Sem Alterações (Limpos)", f"{max(0, passaram_limpos)}")
-            
-            m4, m5, m6 = st.columns(3)
-            m4.metric("Impacto Financeiro 💰", f"{com_imp_financeiro}", delta_color="inverse")
-            m5.metric("Impacto no Prazo ⏰", f"{com_imp_prazo}", delta_color="inverse")
-            m6.metric("Total de Itens Alterados", f"{len(alterados_ids)}")
+            m3.metric("Sem Alterações (Limpos)", f"{max(0, len(itens_mes) - len(alterados_ids))}")
         except Exception as e: st.error(f"Erro nos indicadores: {e}")
 
     elif menu == "🚨 Auditoria":
@@ -348,7 +341,8 @@ if login():
         if papel_usuario not in ["Gerência Geral", "PCP"]: st.error("Acesso negado.")
         else:
             try:
-                df_p = conn.read(worksheet="Pedidos", ttl="1m")
+                # Leitura sem cache para evitar duplicidade baseada em dados antigos
+                df_p = conn.read(worksheet="Pedidos", ttl=0)
                 df_p['Data_Entrega_Str'] = pd.to_datetime(df_p['Data_Entrega'], errors='coerce').dt.strftime('%Y-%m-%d').fillna('')
                 ctr_lista = [""] + sorted(df_p['CTR'].unique().tolist())
                 ctr_sel = st.selectbox("Selecione a CTR para Alteração", ctr_lista, key="ctr_alteracao")
@@ -372,14 +366,19 @@ if login():
                             if st.form_submit_button("APLICAR ALTERAÇÕES EM LOTE 🚀"):
                                 if not motivo: st.error("❌ Descreva o motivo")
                                 else:
+                                    # Lógica CORRIGIDA: Localizar e atualizar em vez de concatenar
                                     df_p.loc[df_p['ID_Item'].isin(selecionados), 'Dono'] = novo_gestor
                                     df_p.loc[df_p['ID_Item'].isin(selecionados), 'Data_Entrega'] = nova_data.strftime('%Y-%m-%d')
                                     df_save = df_p.drop(columns=['Data_Entrega_Str'])
+                                    
+                                    # Gravação segura e limpeza de cache para sincronismo
                                     conn.update(worksheet="Pedidos", data=df_save)
+                                    st.cache_data.clear()
+                                    
                                     df_alt = conn.read(worksheet="Alteracoes", ttl=0)
                                     logs = [{"Data": datetime.now().strftime("%d/%m/%Y %H:%M"), "Pedido": df_p[df_p['ID_Item']==id]['Pedido'].iloc[0], "CTR": ctr_sel, "Usuario": st.session_state.user_display, "O que mudou": f"LOTE: Data {nova_data} / Gestor {novo_gestor}. Motivo: {motivo}", "Impacto no Prazo": imp_prazo, "Impacto Financeiro": imp_financeiro} for id in selecionados]
                                     conn.update(worksheet="Alteracoes", data=pd.concat([df_alt, pd.DataFrame(logs)], ignore_index=True))
-                                    st.success("Atualizados!"); disparar_foguete(); time.sleep(1); st.rerun()
+                                    st.success("Atualizados e Sincronizados!"); disparar_foguete(); time.sleep(1); st.rerun()
             except Exception as e: st.error(f"Erro: {e}")
 
     elif menu == "📥 Importar Itens (Sistema)":
