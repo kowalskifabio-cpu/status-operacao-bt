@@ -164,16 +164,13 @@ if login():
         st.info(f"⚖️ **R:** {responsavel_r} | 🔨 **E:** {executor_e}")
         
         try:
-            # Leitura forçada para garantir sincronismo
             df_pedidos = conn.read(worksheet="Pedidos", ttl=0)
             
-            # REGRA DE STATUS REQUERIDO (DEPENDÊNCIA DE PORTÃO)
             status_requerido = "Aguardando Gate 1" if gate_id == "GATE 1" else \
                                "Aguardando Materiais (G2)" if gate_id == "GATE 2" else \
                                "Aguardando Produção (G3)" if gate_id == "GATE 3" else \
                                "Aguardando Entrega (G4)"
 
-            # FILTRAGEM DE CTRS COM DEPENDÊNCIA TOTAL
             ctrs_com_itens_pendentes = df_pedidos[df_pedidos['Status_Atual'] == status_requerido]['CTR'].unique().tolist()
             ctr_lista = [""] + sorted(ctrs_com_itens_pendentes)
             
@@ -193,7 +190,8 @@ if login():
                                               key=f"multi_{aba}")
                 
                 if selecionados:
-                    pode_assinar = (papel_usuario == responsavel_r or papel_usuario == responsavel_r or papel_usuario == "Gerência Geral")
+                    # LÓGICA DE ACESSO: Responsável (R), Executor (E) ou Gerência Geral
+                    pode_assinar = (papel_usuario == responsavel_r or papel_usuario == executor_e or papel_usuario == "Gerência Geral")
                     if papel_usuario == "Consulta": pode_assinar = False
 
                     with st.form(f"form_batch_{aba}"):
@@ -296,20 +294,26 @@ if login():
                 st.markdown("---")
         except Exception as e: st.error(f"Erro no monitor: {e}")
 
+    # --- CORREÇÃO DE HIERARQUIA DE ACESSOS (R E E) ---
+
     elif menu == "✅ Gate 1: Aceite Técnico":
         itens = {"Informações Comerciais": ["Pedido registrado", "Cliente identificado", "Tipo de obra definido", "Responsável identificado"], "Escopo Técnico": ["Projeto mínimo recebido", "Ambientes definidos", "Materiais principais", "Itens fora do padrão"], "Prazo (prévia)": ["Prazo solicitado registrado", "Prazo avaliado", "Risco de prazo"], "Governança": ["Dono do Pedido definido", "PCP validou viabilidade", "Aprovado formalmente"]}
+        # Responsável (R): DP | Executor (E): PCP
         checklist_gate("GATE 1", "Checklist_G1", itens, "Dono do Pedido (DP)", "PCP", "Projeto incompleto ➡️ BLOQUEADO", "Aguardando Materiais (G2)", "Impedir entrada mal definida", "Antes do plano")
 
     elif menu == "💰 Gate 2: Material":
         itens = {"Materiais": ["Lista validada", "Quantidades conferidas", "Materiais especiais"], "Compras": ["Fornecedores definidos", "Lead times confirmados", "Datas registradas"], "Financeiro": ["Impacto caixa validado", "Compra autorizada", "Forma de pagamento"]}
+        # Responsável (R): Financeiro | Executor (E): Compras (Invertido conforme solicitado)
         checklist_gate("GATE 2", "Checklist_G3", itens, "Financeiro", "Compras", "Falta material ➡️ PARADO", "Aguardando Produção (G3)", "Fábrica sem parada", "Na montagem")
 
     elif menu == "🏭 Gate 3: Produção":
         itens = {"Planejamento": ["Sequenciado", "Capacidade validada", "Gargalo identificado", "Gargalo protegido"], "Projeto": ["Projeto técnico liberado", "Medidas conferidas", "Versão registrada"], "Comunicação": ["Produção ciente", "Prazo interno registrado", "Alterações registradas"]}
+        # Responsável (R): PCP | Executor (E): Produção (Invertido conforme solicitado)
         checklist_gate("GATE 3", "Checklist_G2", itens, "PCP", "Produção", "Sem plano ➡️ BLOQUEADO", "Aguardando Entrega (G4)", "Produzir planejado", "No corte")
 
     elif menu == "🚛 Gate 4: Entrega":
         itens = {"Produto": ["Produção concluída", "Qualidade conferida", "Separados por pedido"], "Logística": ["Checklist carga", "Frota definida", "Rota planejada"], "Prazo": ["Data validada", "Cliente informado", "Equipe montagem alinhada"]}
+        # Responsável (R): DP | Executor (E): Logística
         checklist_gate("GATE 4", "Checklist_G4", itens, "Dono do Pedido (DP)", "Logística", "Erro acabamento ➡️ NÃO carrega", "CONCLUÍDO ✅", "Entrega perfeita", "Na carga")
 
     elif menu == "📈 Indicadores de Performance":
@@ -416,28 +420,21 @@ if login():
                         st.cache_data.clear()
                 except Exception as e: st.error(f"Erro na importação: {e}")
 
-    # --- NOVA PÁGINA DE RECUPERAÇÃO ---
     elif menu == "🛠️ Recuperação de Pedidos":
         st.header("🛠️ Recuperação de Pedidos Órfãos")
         st.warning("Use esta ferramenta para trazer pedidos parados em status antigos para o novo fluxo de Gates.")
         try:
             df_p = conn.read(worksheet="Pedidos", ttl=0)
-            # Define os status válidos do novo sistema
             status_validos = ["Aguardando Gate 1", "Aguardando Materiais (G2)", "Aguardando Produção (G3)", "Aguardando Entrega (G4)", "CONCLUÍDO ✅"]
-            
-            # Filtra pedidos que não estão nos status válidos
             orfaos = df_p[~df_p['Status_Atual'].isin(status_validos)]
-            
             if orfaos.empty:
                 st.success("Todos os pedidos estão em status válidos do novo sistema!")
             else:
                 st.write(f"Encontrados {len(orfaos)} itens fora do fluxo padrão:")
                 st.dataframe(orfaos[['ID_Item', 'Pedido', 'Status_Atual', 'CTR']])
-                
                 with st.form("form_recuperacao"):
                     selecionados_rec = st.multiselect("Selecione os itens para mover:", options=orfaos['ID_Item'].tolist())
                     novo_status_dest = st.selectbox("Mover para qual Gate?", status_validos)
-                    
                     if st.form_submit_button("RECONECTAR AO FLUXO 🚀"):
                         if selecionados_rec:
                             df_p.loc[df_p['ID_Item'].isin(selecionados_rec), 'Status_Atual'] = novo_status_dest
