@@ -4,6 +4,7 @@ import pandas as pd
 from datetime import datetime, date, timedelta
 import os
 import time
+import re
 
 # Configuração da Página
 st.set_page_config(page_title="Status - Gestão Integral por Item", layout="wide", page_icon="🏗️")
@@ -75,6 +76,15 @@ st.markdown("""
 def disparar_foguete():
     st.markdown('<div class="rocket-container">🚀</div>', unsafe_allow_html=True)
 
+# --- FUNÇÃO AUXILIAR PARA EXTRAÇÃO DE NÚMERO (ORDENAÇÃO LÓGICA) ---
+def extrair_numero_item(texto):
+    try:
+        # Busca apenas os dígitos no texto (ex: "ITEM 10" -> 10)
+        nums = re.findall(r'\d+', str(texto))
+        return int(nums[0]) if nums else 9999
+    except:
+        return 9999
+
 # --- SISTEMA DE LOGIN HÍBRIDO ---
 def login():
     if "authenticated" not in st.session_state:
@@ -116,13 +126,15 @@ def login():
 if login():
     conn = st.connection("gsheets", type=GSheetsConnection)
     
-    # LEITURA COM FILTRO RADICAL DE DUPLICADOS
+    # LEITURA COM FILTRO RADICAL DE DUPLICADOS E PREPARAÇÃO PARA ORDENAÇÃO
     @st.cache_data(ttl=15)
     def load_pedidos():
         df = conn.read(worksheet="Pedidos")
         # Garante que IDs vazios não entrem e limpa duplicatas pelo ID único
         df = df.dropna(subset=['ID_Item'])
         df['ID_Item'] = df['ID_Item'].astype(str).str.strip()
+        # Cria coluna auxiliar de ordenação numérica
+        df['sort_num'] = df['Item'].apply(extrair_numero_item)
         return df.drop_duplicates(subset=['ID_Item'], keep='first')
 
     df_global = load_pedidos()
@@ -188,15 +200,19 @@ if login():
             ctr_sel = st.selectbox(f"Selecione a CTR para {gate_id}", ctr_lista, key=f"ctr_gate_{aba}")
             
             if ctr_sel:
-                itens_pendentes = df_p[(df_p['CTR'] == ctr_sel) & (df_p['Status_Atual'] == status_requerido)]
+                itens_pendentes = df_p[(df_p['CTR'] == ctr_sel) & (df_p['Status_Atual'] == status_requerido)].copy()
+                
+                # APLICA A ORDENAÇÃO NUMÉRICA NOS ITENS DA CTR
+                itens_pendentes = itens_pendentes.sort_values(by='sort_num')
                 
                 if itens_pendentes.empty:
                     st.info(f"Não há mais itens pendentes para o {gate_id} nesta CTR.")
                     return
 
+                # Exibição no multiselect respeitando a ordem numérica
                 selecionados = st.multiselect("Itens disponíveis para validação:", 
                                               options=itens_pendentes['ID_Item'].tolist(), 
-                                              format_func=lambda x: f"{itens_pendentes[itens_pendentes['ID_Item'] == x]['Pedido'].iloc[0]}", 
+                                              format_func=lambda x: f"{itens_pendentes[itens_pendentes['ID_Item'] == x]['Item'].iloc[0]} - {itens_pendentes[itens_pendentes['ID_Item'] == x]['Pedido'].iloc[0]}", 
                                               default=itens_pendentes['ID_Item'].tolist(), 
                                               key=f"multi_{aba}")
                 
@@ -256,7 +272,8 @@ if login():
             ctrs = df_p.groupby('CTR').agg({'ID_Item': 'count', 'Data_Entrega_DT': 'min', 'Dono': 'first'}).reset_index()
             for _, row in ctrs.sort_values(by='Data_Entrega_DT').iterrows():
                 ctr_sel = row['CTR']
-                itens_obra = df_p[df_p['CTR'] == ctr_sel].copy()
+                # Ordenação numérica aqui também para consistência visual
+                itens_obra = df_p[df_p['CTR'] == ctr_sel].sort_values(by='sort_num').copy()
                 total_itens = len(itens_obra)
                 dias = (row['Data_Entrega_DT'].date() - date.today()).days if pd.notnull(row['Data_Entrega_DT']) else None
                 with st.container():
@@ -265,13 +282,12 @@ if login():
                     c1.write(f"📅 Entrega Crítica: {row['Data_Entrega_DT'].strftime('%d/%m/%Y') if pd.notnull(row['Data_Entrega_DT']) else 'S/D'}")
                     c2.markdown(f"👤 **Gestor:** {row['Dono']}")
                     with c2.popover(f"🔍 Detalhar Itens ({total_itens})", use_container_width=True):
-                        # Ordenação para garantir que os itens detalhados não se repitam visualmente
-                        for _, item in itens_obra.drop_duplicates(subset=['ID_Item']).iterrows():
+                        for _, item in itens_obra.iterrows():
                             i_dt = pd.to_datetime(item['Data_Entrega'], errors='coerce')
                             i_dias = (i_dt.date() - date.today()).days if pd.notnull(i_dt) else None
                             cor = "#28a745" if i_dias is not None and i_dias > 3 else "#FF0000" if i_dias is not None else "grey"
                             circulo = f'<span class="semaforo" style="background-color: {cor};"></span>'
-                            st.markdown(f"{circulo} **{item['Pedido']}** | 📍 {item['Status_Atual']} | 📅 {i_dt.strftime('%d/%m') if pd.notnull(i_dt) else 'S/D'}", unsafe_allow_html=True)
+                            st.markdown(f"{circulo} **{item['Item']}** - {item['Pedido']} | 📍 {item['Status_Atual']} | 📅 {i_dt.strftime('%d/%m') if pd.notnull(i_dt) else 'S/D'}", unsafe_allow_html=True)
                     if dias is None: status_html = '<span style="color: grey;">⚪ SEM DATA</span>'
                     elif dias < 0: status_html = f'<div class="alerta-pulsante">❌ ATRASO CRÍTICO</div>'
                     elif dias <= 3: status_html = f'<div class="alerta-pulsante">🔴 URGENTE</div>'
@@ -290,7 +306,8 @@ if login():
             if filtro_gestor: df_p = df_p[df_p['Dono'].isin(filtro_gestor)]
             if filtro_ctr: df_p = df_p[df_p['CTR'].isin(filtro_ctr)]
             df_p['Data_Entrega'] = pd.to_datetime(df_p['Data_Entrega'], errors='coerce')
-            for idx, row in df_p.sort_values(by='Data_Entrega', na_position='last').iterrows():
+            # Ordenação prioritária por Data e depois por número do Item
+            for idx, row in df_p.sort_values(by=['Data_Entrega', 'sort_num'], na_position='last').iterrows():
                 dias = (row['Data_Entrega'].date() - date.today()).days if pd.notnull(row['Data_Entrega']) else None
                 status_html = ""
                 if dias is None: status_html = '<span style="color: grey;">⚪ SEM DATA</span>'
@@ -299,7 +316,7 @@ if login():
                 else: status_html = '<div class="no-prazo">🟢 NO PRAZO</div>'
                 c1, c2, c3, c4 = st.columns([2, 4, 2, 2])
                 with c1: st.write(f"**{row['CTR']}**")
-                with c2: st.write(f"**{row['Pedido']}**\n👤 {row['Dono']}")
+                with c2: st.write(f"**{row['Item']}**\n{row['Pedido']}\n👤 {row['Dono']}")
                 with c3: st.write(f"📍 {row['Status_Atual']}\n📅 {row['Data_Entrega'].strftime('%d/%m/%Y') if pd.notnull(row['Data_Entrega']) else 'S/D'}")
                 with c4: st.markdown(status_html, unsafe_allow_html=True)
                 st.markdown("---")
@@ -373,8 +390,12 @@ if login():
                 ctr_lista = [""] + sorted(df_p['CTR'].unique().tolist())
                 ctr_sel = st.selectbox("Selecione a CTR para Alteração", ctr_lista, key="ctr_alteracao")
                 if ctr_sel:
-                    itens_da_ctr = df_p[df_p['CTR'] == ctr_sel]
-                    selecionados = st.multiselect("Selecione os itens:", options=itens_da_ctr['ID_Item'].tolist(), format_func=lambda x: f"{itens_da_ctr[itens_da_ctr['ID_Item'] == x]['Pedido'].iloc[0]}", default=itens_da_ctr['ID_Item'].tolist())
+                    # Também ordena aqui para facilitar a seleção
+                    itens_da_ctr = df_p[df_p['CTR'] == ctr_sel].sort_values(by='sort_num')
+                    selecionados = st.multiselect("Selecione os itens:", 
+                                                  options=itens_da_ctr['ID_Item'].tolist(), 
+                                                  format_func=lambda x: f"{itens_da_ctr[itens_da_ctr['ID_Item'] == x]['Item'].iloc[0]} - {itens_da_ctr[itens_da_ctr['ID_Item'] == x]['Pedido'].iloc[0]}", 
+                                                  default=itens_da_ctr['ID_Item'].tolist())
                     if selecionados:
                         with st.form("form_alteracao_lote"):
                             col1, col2 = st.columns(2)
