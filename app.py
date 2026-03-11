@@ -143,8 +143,8 @@ if login():
         "📈 Indicadores de Performance", 
         "🚨 Auditoria", 
         "✅ Gate 1: Aceite Técnico", 
-        "🏭 Gate 2: Produção", 
-        "💰 Gate 3: Material", 
+        "💰 Gate 2: Material", 
+        "🏭 Gate 3: Produção", 
         "🚛 Gate 4: Entrega", 
         "⚠️ Alteração de Pedido",
         "📥 Importar Itens (Sistema)"
@@ -163,9 +163,11 @@ if login():
         
         try:
             df_pedidos = conn.read(worksheet="Pedidos", ttl="10s")
+            
+            # REGRA DE STATUS REQUERIDO (DEPENDÊNCIA DE PORTÃO)
             status_requerido = "Aguardando Gate 1" if gate_id == "GATE 1" else \
-                               "Aguardando Produção (G2)" if gate_id == "GATE 2" else \
-                               "Aguardando Materiais (G3)" if gate_id == "GATE 3" else \
+                               "Aguardando Materiais (G2)" if gate_id == "GATE 2" else \
+                               "Aguardando Produção (G3)" if gate_id == "GATE 3" else \
                                "Aguardando Entrega (G4)"
 
             ctr_lista = [""] + sorted(df_pedidos['CTR'].unique().tolist())
@@ -174,7 +176,7 @@ if login():
             if ctr_sel:
                 itens_pendentes = df_pedidos[(df_pedidos['CTR'] == ctr_sel) & (df_pedidos['Status_Atual'] == status_requerido)]
                 if itens_pendentes.empty:
-                    st.success(f"Não há itens pendentes para o {gate_id} nesta CTR.")
+                    st.success(f"Não há itens pendentes para o {gate_id} nesta CTR (Verifique se foram aprovados no portão anterior).")
                     return
 
                 selecionados = st.multiselect("Itens disponíveis:", options=itens_pendentes['ID_Item'].tolist(), format_func=lambda x: itens_pendentes[itens_pendentes['ID_Item'] == x]['Pedido'].iloc[0], default=itens_pendentes['ID_Item'].tolist(), key=f"multi_{aba}")
@@ -226,17 +228,22 @@ if login():
         st.header("📉 Monitor de Produção por CTR")
         try:
             df_p = conn.read(worksheet="Pedidos", ttl=0)
-            df_p['Data_Entrega_DT'] = pd.to_datetime(df_p['Data_Entrega'], errors='coerce')
             
-            # AGRUPAMENTO GARANTIDO: Recalcula a data crítica após as alterações de lote
+            # --- FILTROS NO DASHBOARD ---
+            c_f1, c_f2 = st.columns(2)
+            filtro_gestor = c_f1.multiselect("Filtrar por Gestor", sorted(df_p['Dono'].unique()))
+            filtro_ctr = c_f2.multiselect("Filtrar por CTR", sorted(df_p['CTR'].unique()))
+            
+            if filtro_gestor: df_p = df_p[df_p['Dono'].isin(filtro_gestor)]
+            if filtro_ctr: df_p = df_p[df_p['CTR'].isin(filtro_ctr)]
+            
+            df_p['Data_Entrega_DT'] = pd.to_datetime(df_p['Data_Entrega'], errors='coerce')
             ctrs = df_p.groupby('CTR').agg({'ID_Item': 'count', 'Data_Entrega_DT': 'min', 'Dono': 'first'}).reset_index()
             
             for _, row in ctrs.sort_values(by='Data_Entrega_DT').iterrows():
                 ctr_sel = row['CTR']
                 itens_obra = df_p[df_p['CTR'] == ctr_sel].copy()
                 total_itens = len(itens_obra)
-                
-                # REGRAS DE STATUS DINÂMICO
                 dias = (row['Data_Entrega_DT'].date() - date.today()).days if pd.notnull(row['Data_Entrega_DT']) else None
                 
                 with st.container():
@@ -264,6 +271,15 @@ if login():
         st.header("🚦 Monitor de Produção (Itens)")
         try:
             df_p = conn.read(worksheet="Pedidos", ttl=0)
+            
+            # --- FILTROS NO PAINEL DE ITENS ---
+            c_f1, c_f2 = st.columns(2)
+            filtro_gestor = c_f1.multiselect("Filtrar por Gestor", sorted(df_p['Dono'].unique()), key="f_gest_itens")
+            filtro_ctr = c_f2.multiselect("Filtrar por CTR", sorted(df_p['CTR'].unique()), key="f_ctr_itens")
+            
+            if filtro_gestor: df_p = df_p[df_p['Dono'].isin(filtro_gestor)]
+            if filtro_ctr: df_p = df_p[df_p['CTR'].isin(filtro_ctr)]
+            
             df_p['Data_Entrega'] = pd.to_datetime(df_p['Data_Entrega'], errors='coerce')
             for idx, row in df_p.sort_values(by='Data_Entrega', na_position='last').iterrows():
                 dias = (row['Data_Entrega'].date() - date.today()).days if pd.notnull(row['Data_Entrega']) else None
@@ -279,6 +295,26 @@ if login():
                 with c4: st.markdown(status_html, unsafe_allow_html=True)
                 st.markdown("---")
         except Exception as e: st.error(f"Erro no monitor: {e}")
+
+    # --- EXECUÇÃO DOS GATES (ORDEM E REGRAS ATUALIZADAS) ---
+
+    elif menu == "✅ Gate 1: Aceite Técnico":
+        itens = {"Informações Comerciais": ["Pedido registrado", "Cliente identificado", "Tipo de obra definido", "Responsável identificado"], "Escopo Técnico": ["Projeto mínimo recebido", "Ambientes definidos", "Materiais principais", "Itens fora do padrão"], "Prazo (prévia)": ["Prazo solicitado registrado", "Prazo avaliado", "Risco de prazo"], "Governança": ["Dono do Pedido definido", "PCP validou viabilidade", "Aprovado formalmente"]}
+        checklist_gate("GATE 1", "Checklist_G1", itens, "Dono do Pedido (DP)", "PCP", "Projeto incompleto ➡️ BLOQUEADO", "Aguardando Materiais (G2)", "Impedir entrada mal definida", "Antes do plano")
+
+    elif menu == "💰 Gate 2: Material":
+        itens = {"Materiais": ["Lista validada", "Quantidades conferidas", "Materiais especiais"], "Compras": ["Fornecedores definidos", "Lead times confirmados", "Datas registradas"], "Financeiro": ["Impacto caixa validado", "Compra autorizada", "Forma de pagamento"]}
+        checklist_gate("GATE 2", "Checklist_G3", itens, "Financeiro", "Compras", "Falta material ➡️ PARADO", "Aguardando Produção (G3)", "Fábrica sem parada", "Na montagem")
+
+    elif menu == "🏭 Gate 3: Produção":
+        itens = {"Planejamento": ["Sequenciado", "Capacidade validada", "Gargalo identificado", "Gargalo protegido"], "Projeto": ["Projeto técnico liberado", "Medidas conferidas", "Versão registrada"], "Comunicação": ["Produção ciente", "Prazo interno registrado", "Alterações registradas"]}
+        checklist_gate("GATE 3", "Checklist_G2", itens, "PCP", "Produção", "Sem plano ➡️ BLOQUEADO", "Aguardando Entrega (G4)", "Produzir planejado", "No corte")
+
+    elif menu == "🚛 Gate 4: Entrega":
+        itens = {"Produto": ["Produção concluída", "Qualidade conferida", "Separados por pedido"], "Logística": ["Checklist carga", "Frota definida", "Rota planejada"], "Prazo": ["Data validada", "Cliente informado", "Equipe montagem alinhada"]}
+        checklist_gate("GATE 4", "Checklist_G4", itens, "Dono do Pedido (DP)", "Logística", "Erro acabamento ➡️ NÃO carrega", "CONCLUÍDO ✅", "Entrega perfeita", "Na carga")
+
+    # --- DEMAIS PÁGINAS (PRESERVADAS) ---
 
     elif menu == "📈 Indicadores de Performance":
         st.header("📈 Dashboard de Indicadores")
@@ -297,8 +333,8 @@ if login():
             gates_count = df_p['Status_Atual'].value_counts()
             c_g1, c_g2, c_g3, c_g4, c_g5 = st.columns(5)
             c_g1.metric("Gate 1", gates_count.get("Aguardando Gate 1", 0))
-            c_g2.metric("Gate 2", gates_count.get("Aguardando Produção (G2)", 0))
-            c_g3.metric("Gate 3", gates_count.get("Aguardando Materiais (G3)", 0))
+            c_g2.metric("Gate 2", gates_count.get("Aguardando Materiais (G2)", 0))
+            c_g3.metric("Gate 3", gates_count.get("Aguardando Produção (G3)", 0))
             c_g4.metric("Gate 4", gates_count.get("Aguardando Entrega (G4)", 0))
             c_g5.metric("Concluídos", gates_count.get("CONCLUÍDO ✅", 0))
             
@@ -324,22 +360,6 @@ if login():
             df_aud = df_aud.sort_values(by='temp_date', ascending=False).drop(columns=['temp_date'])
             st.table(df_aud)
         except Exception as e: st.error(f"Erro na auditoria: {e}")
-
-    elif menu == "✅ Gate 1: Aceite Técnico":
-        itens = {"Informações Comerciais": ["Pedido registrado", "Cliente identificado", "Tipo de obra definido", "Responsável identificado"], "Escopo Técnico": ["Projeto mínimo recebido", "Ambientes definidos", "Materiais principais", "Itens fora do padrão"], "Prazo (prévia)": ["Prazo solicitado registrado", "Prazo avaliado", "Risco de prazo"], "Governança": ["Dono do Pedido definido", "PCP validou viabilidade", "Aprovado formalmente"]}
-        checklist_gate("GATE 1", "Checklist_G1", itens, "Dono do Pedido (DP)", "PCP", "Projeto incompleto ➡️ BLOQUEADO", "Aguardando Produção (G2)", "Impedir entrada mal definida", "Antes do plano")
-
-    elif menu == "🏭 Gate 2: Produção":
-        itens = {"Planejamento": ["Sequenciado", "Capacidade validada", "Gargalo identificado", "Gargalo protegido"], "Projeto": ["Projeto técnico liberado", "Medidas conferidas", "Versão registrada"], "Comunicação": ["Produção ciente", "Prazo interno registrado", "Alterações registradas"]}
-        checklist_gate("GATE 2", "Checklist_G2", itens, "PCP", "Produção", "Sem plano ➡️ BLOQUEADO", "Aguardando Materiais (G3)", "Produzir planejado", "No corte")
-
-    elif menu == "💰 Gate 3: Material":
-        itens = {"Materiais": ["Lista validada", "Quantidades conferidas", "Materiais especiais"], "Compras": ["Fornecedores definidos", "Lead times confirmados", "Datas registradas"], "Financeiro": ["Impacto caixa validado", "Compra autorizada", "Forma de pagamento"]}
-        checklist_gate("GATE 3", "Checklist_G3", itens, "Financeiro", "Compras", "Falta material ➡️ PARADO", "Aguardando Entrega (G4)", "Fábrica sem parada", "Na montagem")
-
-    elif menu == "🚛 Gate 4: Entrega":
-        itens = {"Produto": ["Produção concluída", "Qualidade conferida", "Separados por pedido"], "Logística": ["Checklist carga", "Frota definida", "Rota planejada"], "Prazo": ["Data validada", "Cliente informado", "Equipe montagem alinhada"]}
-        checklist_gate("GATE 4", "Checklist_G4", itens, "Dono do Pedido (DP)", "Logística", "Erro acabamento ➡️ NÃO carrega", "CONCLUÍDO ✅", "Entrega perfeita", "Na carga")
 
     elif menu == "⚠️ Alteração de Pedido":
         st.header("🔄 Alteração de Pedido em Lote")
@@ -374,16 +394,12 @@ if login():
                             if st.form_submit_button("APLICAR ALTERAÇÕES EM LOTE 🚀"):
                                 if not motivo: st.error("❌ Descreva o motivo")
                                 else:
-                                    # REGRA DE SOBRESCRITA GARANTIDA: Localiza e substitui apenas os IDs selecionados
                                     df_p.loc[df_p['ID_Item'].isin(selecionados), 'Dono'] = novo_gestor
                                     df_p.loc[df_p['ID_Item'].isin(selecionados), 'Data_Entrega'] = nova_data.strftime('%Y-%m-%d')
                                     df_save = df_p.drop(columns=['Data_Entrega_Str'])
-                                    
-                                    # Gravação segura e limpeza de cache
                                     conn.update(worksheet="Pedidos", data=df_save)
                                     st.cache_data.clear()
                                     
-                                    # Log de Auditoria
                                     df_alt = conn.read(worksheet="Alteracoes", ttl=0)
                                     logs = [{"Data": datetime.now().strftime("%d/%m/%Y %H:%M"), "Pedido": df_p[df_p['ID_Item']==id]['Pedido'].iloc[0], "CTR": ctr_sel, "Usuario": st.session_state.user_display, "O que mudou": f"LOTE: Data {nova_data} / Gestor {novo_gestor}. Motivo: {motivo}", "Impacto no Prazo": imp_prazo, "Impacto Financeiro": imp_financeiro} for id in selecionados]
                                     conn.update(worksheet="Alteracoes", data=pd.concat([df_alt, pd.DataFrame(logs)], ignore_index=True))
@@ -409,7 +425,6 @@ if login():
                             uid = f"{r['Centro de custo']}-{r['Id Programação']}"
                             dt_crua = pd.to_datetime(r['Data Entrega'], errors='coerce')
                             dt_limpa = dt_crua.strftime('%Y-%m-%d') if pd.notnull(dt_crua) else ""
-                            # REGRA DE PROTEÇÃO: Só adiciona se o UID não existir para evitar duplicidade na base
                             if uid not in df_base['ID_Item'].astype(str).values:
                                 novos.append({"ID_Item": uid, "CTR": r['Centro de custo'], "Obra": r['Obra'], "Item": r['Item'], "Pedido": r['Produto'], "Dono": r['Gestor'], "Status_Atual": "Aguardando Gate 1", "Data_Entrega": dt_limpa, "Quantidade": r['Quantidade'], "Unidade": r['Unidade']})
                         if novos: conn.update(worksheet="Pedidos", data=pd.concat([df_base, pd.DataFrame(novos)], ignore_index=True)); st.success("Importado!")
