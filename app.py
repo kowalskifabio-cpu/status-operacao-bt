@@ -116,18 +116,19 @@ def login():
 if login():
     conn = st.connection("gsheets", type=GSheetsConnection)
     
-    # CENTRALIZAÇÃO DE LEITURA (Reduz chamadas à API)
-    # Usamos 15s de cache para evitar o erro 429
     @st.cache_data(ttl=15)
     def load_pedidos():
-        return conn.read(worksheet="Pedidos")
+        df = conn.read(worksheet="Pedidos")
+        # CURA DE DUPLICADOS: Remove qualquer duplicata baseada no ID único mantendo o primeiro registro
+        return df.drop_duplicates(subset=['ID_Item'], keep='first')
 
     df_global = load_pedidos()
 
     def atualizar_status_lote(lista_ids, novo_status):
-        # Aqui precisamos ler com ttl=0 para gravar o dado mais recente
         df_update = conn.read(worksheet="Pedidos", ttl=0)
         df_update.loc[df_update['ID_Item'].isin(lista_ids), 'Status_Atual'] = novo_status
+        # Segurança extra: remove duplicados antes de salvar na nuvem
+        df_update = df_update.drop_duplicates(subset=['ID_Item'], keep='first')
         conn.update(worksheet="Pedidos", data=df_update)
         st.cache_data.clear() 
 
@@ -387,10 +388,11 @@ if login():
                             if st.form_submit_button("APLICAR ALTERAÇÕES EM LOTE 🚀"):
                                 if not motivo: st.error("❌ Descreva o motivo")
                                 else:
-                                    # Para atualização, ignoramos o cache e gravamos no mestre
                                     df_save = conn.read(worksheet="Pedidos", ttl=0)
                                     df_save.loc[df_save['ID_Item'].isin(selecionados), 'Dono'] = novo_gestor
                                     df_save.loc[df_save['ID_Item'].isin(selecionados), 'Data_Entrega'] = nova_data.strftime('%Y-%m-%d')
+                                    # Trava de Duplicidade no Save
+                                    df_save = df_save.drop_duplicates(subset=['ID_Item'], keep='first')
                                     conn.update(worksheet="Pedidos", data=df_save)
                                     st.cache_data.clear()
                                     df_alt = conn.read(worksheet="Alteracoes", ttl=0)
@@ -411,13 +413,22 @@ if login():
                     if st.button("Confirmar Importação"):
                         df_base = conn.read(worksheet="Pedidos", ttl=0)
                         novos = []
+                        # TRAVA DE IMPORTAÇÃO: Só adiciona se o ID_Item for realmente inédito
                         for _, r in df_up.iterrows():
                             uid = f"{r['Centro de custo']}-{r['Id Programação']}"
                             dt_crua = pd.to_datetime(r['Data Entrega'], errors='coerce')
                             dt_limpa = dt_crua.strftime('%Y-%m-%d') if pd.notnull(dt_crua) else ""
-                            if uid not in df_base['ID_Item'].astype(str).values:
+                            if str(uid) not in df_base['ID_Item'].astype(str).values:
                                 novos.append({"ID_Item": uid, "CTR": r['Centro de custo'], "Obra": r['Obra'], "Item": r['Item'], "Pedido": r['Produto'], "Dono": r['Gestor'], "Status_Atual": "Aguardando Gate 1", "Data_Entrega": dt_limpa, "Quantidade": r['Quantidade'], "Unidade": r['Unidade']})
-                        if novos: conn.update(worksheet="Pedidos", data=pd.concat([df_base, pd.DataFrame(novos)], ignore_index=True)); st.success("Importado!")
+                        
+                        if novos: 
+                            final_df = pd.concat([df_base, pd.DataFrame(novos)], ignore_index=True)
+                            # Limpeza final de redundâncias
+                            final_df = final_df.drop_duplicates(subset=['ID_Item'], keep='first')
+                            conn.update(worksheet="Pedidos", data=final_df)
+                            st.success(f"✅ {len(novos)} novos itens importados com sucesso!")
+                        else:
+                            st.warning("⚠️ Nenhum item novo encontrado no arquivo.")
                         st.cache_data.clear()
                 except Exception as e: st.error(f"Erro na importação: {e}")
 
@@ -438,9 +449,9 @@ if login():
                     novo_status_dest = st.selectbox("Mover para qual Gate?", status_validos)
                     if st.form_submit_button("RECONECTAR AO FLUXO 🚀"):
                         if selecionados_rec:
-                            # Gravação direta sem cache
                             df_save = conn.read(worksheet="Pedidos", ttl=0)
                             df_save.loc[df_save['ID_Item'].isin(selecionados_rec), 'Status_Atual'] = novo_status_dest
+                            df_save = df_save.drop_duplicates(subset=['ID_Item'], keep='first')
                             conn.update(worksheet="Pedidos", data=df_save)
                             st.cache_data.clear()
                             st.success(f"Itens movidos para {novo_status_dest}!")
