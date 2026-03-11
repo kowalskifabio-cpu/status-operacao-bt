@@ -97,7 +97,7 @@ def login():
                 else:
                     try:
                         temp_conn = st.connection("gsheets", type=GSheetsConnection)
-                        df_users = temp_conn.read(worksheet="Usuarios", ttl="1m")
+                        df_users = temp_conn.read(worksheet="Usuarios", ttl="10m")
                         df_users['Usuario'] = df_users['Usuario'].astype(str).str.strip()
                         df_users['Senha'] = df_users['Senha'].astype(str).str.strip()
                         user_match = df_users[(df_users['Usuario'] == user) & (df_users['Senha'] == password)]
@@ -115,11 +115,20 @@ def login():
 
 if login():
     conn = st.connection("gsheets", type=GSheetsConnection)
+    
+    # CENTRALIZAÇÃO DE LEITURA (Reduz chamadas à API)
+    # Usamos 15s de cache para evitar o erro 429
+    @st.cache_data(ttl=15)
+    def load_pedidos():
+        return conn.read(worksheet="Pedidos")
+
+    df_global = load_pedidos()
 
     def atualizar_status_lote(lista_ids, novo_status):
-        df_pedidos = conn.read(worksheet="Pedidos", ttl=0)
-        df_pedidos.loc[df_pedidos['ID_Item'].isin(lista_ids), 'Status_Atual'] = novo_status
-        conn.update(worksheet="Pedidos", data=df_pedidos)
+        # Aqui precisamos ler com ttl=0 para gravar o dado mais recente
+        df_update = conn.read(worksheet="Pedidos", ttl=0)
+        df_update.loc[df_update['ID_Item'].isin(lista_ids), 'Status_Atual'] = novo_status
+        conn.update(worksheet="Pedidos", data=df_update)
         st.cache_data.clear() 
 
     # --- MENU LATERAL ---
@@ -158,26 +167,24 @@ if login():
         
     menu = st.sidebar.radio("Navegação", opcoes_menu)
 
-    def checklist_gate(gate_id, aba, itens_checklist, responsavel_r, executor_e, msg_bloqueio, proximo_status, objetivo, momento):
+    def checklist_gate(gate_id, aba, itens_checklist, responsavel_r, executor_e, msg_bloqueio, proximo_status, objetivo, momento, df_p):
         st.header(f"Ficha de Controle: {gate_id}")
         st.markdown(f"**Objetivo:** {objetivo} | **Momento:** {momento}")
         st.info(f"⚖️ **R:** {responsavel_r} | 🔨 **E:** {executor_e}")
         
         try:
-            df_pedidos = conn.read(worksheet="Pedidos", ttl=0)
-            
             status_requerido = "Aguardando Gate 1" if gate_id == "GATE 1" else \
                                "Aguardando Materiais (G2)" if gate_id == "GATE 2" else \
                                "Aguardando Produção (G3)" if gate_id == "GATE 3" else \
                                "Aguardando Entrega (G4)"
 
-            ctrs_com_itens_pendentes = df_pedidos[df_pedidos['Status_Atual'] == status_requerido]['CTR'].unique().tolist()
+            ctrs_com_itens_pendentes = df_p[df_p['Status_Atual'] == status_requerido]['CTR'].unique().tolist()
             ctr_lista = [""] + sorted(ctrs_com_itens_pendentes)
             
             ctr_sel = st.selectbox(f"Selecione a CTR para {gate_id}", ctr_lista, key=f"ctr_gate_{aba}")
             
             if ctr_sel:
-                itens_pendentes = df_pedidos[(df_pedidos['CTR'] == ctr_sel) & (df_pedidos['Status_Atual'] == status_requerido)]
+                itens_pendentes = df_p[(df_p['CTR'] == ctr_sel) & (df_p['Status_Atual'] == status_requerido)]
                 
                 if itens_pendentes.empty:
                     st.info(f"Não há mais itens pendentes para o {gate_id} nesta CTR.")
@@ -190,7 +197,6 @@ if login():
                                               key=f"multi_{aba}")
                 
                 if selecionados:
-                    # LÓGICA DE ACESSO: Responsável (R), Executor (E) ou Gerência Geral
                     pode_assinar = (papel_usuario == responsavel_r or papel_usuario == executor_e or papel_usuario == "Gerência Geral")
                     if papel_usuario == "Consulta": pode_assinar = False
 
@@ -207,7 +213,7 @@ if login():
                         if st.form_submit_button(btn_label, disabled=not pode_assinar):
                             if not all(respostas.values()): st.error(f"❌ BLOQUEIO: {msg_bloqueio}")
                             else:
-                                df_gate = conn.read(worksheet=aba, ttl=0)
+                                df_gate = conn.read(worksheet=aba, ttl="1m")
                                 novas_linhas = []
                                 logs_auditoria = []
                                 for id_item in selecionados:
@@ -224,7 +230,7 @@ if login():
                                         "CTR": ctr_sel
                                     })
                                 conn.update(worksheet=aba, data=pd.concat([df_gate, pd.DataFrame(novas_linhas)], ignore_index=True))
-                                df_alt = conn.read(worksheet="Alteracoes", ttl=0)
+                                df_alt = conn.read(worksheet="Alteracoes", ttl="1m")
                                 conn.update(worksheet="Alteracoes", data=pd.concat([df_alt, pd.DataFrame(logs_auditoria)], ignore_index=True))
                                 atualizar_status_lote(selecionados, proximo_status)
                                 st.success(f"🚀 {len(selecionados)} itens validados!")
@@ -236,7 +242,7 @@ if login():
     if menu == "📉 Monitor por Pedido (CTR)":
         st.header("📉 Monitor de Produção por CTR")
         try:
-            df_p = conn.read(worksheet="Pedidos", ttl=0)
+            df_p = df_global.copy()
             c_f1, c_f2 = st.columns(2)
             filtro_gestor = c_f1.multiselect("Filtrar por Gestor", sorted(df_p['Dono'].unique()))
             filtro_ctr = c_f2.multiselect("Filtrar por CTR", sorted(df_p['CTR'].unique()))
@@ -272,7 +278,7 @@ if login():
     elif menu == "📊 Resumo e Prazos (Itens)":
         st.header("🚦 Monitor de Produção (Itens)")
         try:
-            df_p = conn.read(worksheet="Pedidos", ttl=0)
+            df_p = df_global.copy()
             c_f1, c_f2 = st.columns(2)
             filtro_gestor = c_f1.multiselect("Filtrar por Gestor", sorted(df_p['Dono'].unique()), key="f_gest_itens")
             filtro_ctr = c_f2.multiselect("Filtrar por CTR", sorted(df_p['CTR'].unique()), key="f_ctr_itens")
@@ -294,33 +300,27 @@ if login():
                 st.markdown("---")
         except Exception as e: st.error(f"Erro no monitor: {e}")
 
-    # --- CORREÇÃO DE HIERARQUIA DE ACESSOS (R E E) ---
-
     elif menu == "✅ Gate 1: Aceite Técnico":
         itens = {"Informações Comerciais": ["Pedido registrado", "Cliente identificado", "Tipo de obra definido", "Responsável identificado"], "Escopo Técnico": ["Projeto mínimo recebido", "Ambientes definidos", "Materiais principais", "Itens fora do padrão"], "Prazo (prévia)": ["Prazo solicitado registrado", "Prazo avaliado", "Risco de prazo"], "Governança": ["Dono do Pedido definido", "PCP validou viabilidade", "Aprovado formalmente"]}
-        # Responsável (R): DP | Executor (E): PCP
-        checklist_gate("GATE 1", "Checklist_G1", itens, "Dono do Pedido (DP)", "PCP", "Projeto incompleto ➡️ BLOQUEADO", "Aguardando Materiais (G2)", "Impedir entrada mal definida", "Antes do plano")
+        checklist_gate("GATE 1", "Checklist_G1", itens, "Dono do Pedido (DP)", "PCP", "Projeto incompleto ➡️ BLOQUEADO", "Aguardando Materiais (G2)", "Impedir entrada mal definida", "Antes do plano", df_global)
 
     elif menu == "💰 Gate 2: Material":
         itens = {"Materiais": ["Lista validada", "Quantidades conferidas", "Materiais especiais"], "Compras": ["Fornecedores definidos", "Lead times confirmados", "Datas registradas"], "Financeiro": ["Impacto caixa validado", "Compra autorizada", "Forma de pagamento"]}
-        # Responsável (R): Financeiro | Executor (E): Compras (Invertido conforme solicitado)
-        checklist_gate("GATE 2", "Checklist_G3", itens, "Financeiro", "Compras", "Falta material ➡️ PARADO", "Aguardando Produção (G3)", "Fábrica sem parada", "Na montagem")
+        checklist_gate("GATE 2", "Checklist_G3", itens, "Financeiro", "Compras", "Falta material ➡️ PARADO", "Aguardando Produção (G3)", "Fábrica sem parada", "Na montagem", df_global)
 
     elif menu == "🏭 Gate 3: Produção":
         itens = {"Planejamento": ["Sequenciado", "Capacidade validada", "Gargalo identificado", "Gargalo protegido"], "Projeto": ["Projeto técnico liberado", "Medidas conferidas", "Versão registrada"], "Comunicação": ["Produção ciente", "Prazo interno registrado", "Alterações registradas"]}
-        # Responsável (R): PCP | Executor (E): Produção (Invertido conforme solicitado)
-        checklist_gate("GATE 3", "Checklist_G2", itens, "PCP", "Produção", "Sem plano ➡️ BLOQUEADO", "Aguardando Entrega (G4)", "Produzir planejado", "No corte")
+        checklist_gate("GATE 3", "Checklist_G2", itens, "PCP", "Produção", "Sem plano ➡️ BLOQUEADO", "Aguardando Entrega (G4)", "Produzir planejado", "No corte", df_global)
 
     elif menu == "🚛 Gate 4: Entrega":
         itens = {"Produto": ["Produção concluída", "Qualidade conferida", "Separados por pedido"], "Logística": ["Checklist carga", "Frota definida", "Rota planejada"], "Prazo": ["Data validada", "Cliente informado", "Equipe montagem alinhada"]}
-        # Responsável (R): DP | Executor (E): Logística
-        checklist_gate("GATE 4", "Checklist_G4", itens, "Dono do Pedido (DP)", "Logística", "Erro acabamento ➡️ NÃO carrega", "CONCLUÍDO ✅", "Entrega perfeita", "Na carga")
+        checklist_gate("GATE 4", "Checklist_G4", itens, "Dono do Pedido (DP)", "Logística", "Erro acabamento ➡️ NÃO carrega", "CONCLUÍDO ✅", "Entrega perfeita", "Na carga", df_global)
 
     elif menu == "📈 Indicadores de Performance":
         st.header("📈 Dashboard de Indicadores")
         try:
-            df_p = conn.read(worksheet="Pedidos", ttl="1m")
-            df_aud = conn.read(worksheet="Alteracoes", ttl="1m")
+            df_p = df_global.copy()
+            df_aud = conn.read(worksheet="Alteracoes", ttl="10m")
             df_aud['DT_Filtro'] = pd.to_datetime(df_aud['Data'], format="%d/%m/%Y %H:%M", errors='coerce')
             anos = sorted(df_aud['DT_Filtro'].dt.year.dropna().unique().tolist(), reverse=True)
             meses = {1: "Janeiro", 2: "Fevereiro", 3: "Março", 4: "Abril", 5: "Maio", 6: "Junho", 7: "Julho", 8: "Agosto", 9: "Setembro", 10: "Outubro", 11: "Novembro", 12: "Dezembro"}
@@ -352,7 +352,7 @@ if login():
     elif menu == "🚨 Auditoria":
         st.header("🚨 Auditoria")
         try:
-            df_aud = conn.read(worksheet="Alteracoes", ttl="1m")
+            df_aud = conn.read(worksheet="Alteracoes", ttl="5m")
             df_aud['temp_date'] = pd.to_datetime(df_aud['Data'], format="%d/%m/%Y %H:%M", errors='coerce')
             df_aud = df_aud.sort_values(by='temp_date', ascending=False).drop(columns=['temp_date'])
             st.table(df_aud)
@@ -363,7 +363,7 @@ if login():
         if papel_usuario not in ["Gerência Geral", "PCP"]: st.error("Acesso negado.")
         else:
             try:
-                df_p = conn.read(worksheet="Pedidos", ttl=0)
+                df_p = df_global.copy()
                 df_p['Data_Entrega_Str'] = pd.to_datetime(df_p['Data_Entrega'], errors='coerce').dt.strftime('%Y-%m-%d').fillna('')
                 ctr_lista = [""] + sorted(df_p['CTR'].unique().tolist())
                 ctr_sel = st.selectbox("Selecione a CTR para Alteração", ctr_lista, key="ctr_alteracao")
@@ -387,13 +387,14 @@ if login():
                             if st.form_submit_button("APLICAR ALTERAÇÕES EM LOTE 🚀"):
                                 if not motivo: st.error("❌ Descreva o motivo")
                                 else:
-                                    df_p.loc[df_p['ID_Item'].isin(selecionados), 'Dono'] = novo_gestor
-                                    df_p.loc[df_p['ID_Item'].isin(selecionados), 'Data_Entrega'] = nova_data.strftime('%Y-%m-%d')
-                                    df_save = df_p.drop(columns=['Data_Entrega_Str'])
+                                    # Para atualização, ignoramos o cache e gravamos no mestre
+                                    df_save = conn.read(worksheet="Pedidos", ttl=0)
+                                    df_save.loc[df_save['ID_Item'].isin(selecionados), 'Dono'] = novo_gestor
+                                    df_save.loc[df_save['ID_Item'].isin(selecionados), 'Data_Entrega'] = nova_data.strftime('%Y-%m-%d')
                                     conn.update(worksheet="Pedidos", data=df_save)
                                     st.cache_data.clear()
                                     df_alt = conn.read(worksheet="Alteracoes", ttl=0)
-                                    logs = [{"Data": datetime.now().strftime("%d/%m/%Y %H:%M"), "Pedido": df_p[df_p['ID_Item']==id]['Pedido'].iloc[0], "CTR": ctr_sel, "Usuario": st.session_state.user_display, "O que mudou": f"LOTE: Data {nova_data} / Gestor {novo_gestor}. Motivo: {motivo}", "Impacto no Prazo": imp_prazo, "Impacto Financeiro": imp_financeiro} for id in selecionados]
+                                    logs = [{"Data": datetime.now().strftime("%d/%m/%Y %H:%M"), "Pedido": df_save[df_save['ID_Item']==id]['Pedido'].iloc[0], "CTR": ctr_sel, "Usuario": st.session_state.user_display, "O que mudou": f"LOTE: Data {nova_data} / Gestor {novo_gestor}. Motivo: {motivo}", "Impacto no Prazo": imp_prazo, "Impacto Financeiro": imp_financeiro} for id in selecionados]
                                     conn.update(worksheet="Alteracoes", data=pd.concat([df_alt, pd.DataFrame(logs)], ignore_index=True))
                                     st.success("✅ Pedido atualizado!")
                                     disparar_foguete(); time.sleep(1.5); st.rerun()
@@ -424,7 +425,7 @@ if login():
         st.header("🛠️ Recuperação de Pedidos Órfãos")
         st.warning("Use esta ferramenta para trazer pedidos parados em status antigos para o novo fluxo de Gates.")
         try:
-            df_p = conn.read(worksheet="Pedidos", ttl=0)
+            df_p = df_global.copy()
             status_validos = ["Aguardando Gate 1", "Aguardando Materiais (G2)", "Aguardando Produção (G3)", "Aguardando Entrega (G4)", "CONCLUÍDO ✅"]
             orfaos = df_p[~df_p['Status_Atual'].isin(status_validos)]
             if orfaos.empty:
@@ -437,8 +438,10 @@ if login():
                     novo_status_dest = st.selectbox("Mover para qual Gate?", status_validos)
                     if st.form_submit_button("RECONECTAR AO FLUXO 🚀"):
                         if selecionados_rec:
-                            df_p.loc[df_p['ID_Item'].isin(selecionados_rec), 'Status_Atual'] = novo_status_dest
-                            conn.update(worksheet="Pedidos", data=df_p)
+                            # Gravação direta sem cache
+                            df_save = conn.read(worksheet="Pedidos", ttl=0)
+                            df_save.loc[df_save['ID_Item'].isin(selecionados_rec), 'Status_Atual'] = novo_status_dest
+                            conn.update(worksheet="Pedidos", data=df_save)
                             st.cache_data.clear()
                             st.success(f"Itens movidos para {novo_status_dest}!")
                             st.rerun()
