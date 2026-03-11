@@ -162,7 +162,7 @@ if login():
         st.info(f"⚖️ **R:** {responsavel_r} | 🔨 **E:** {executor_e}")
         
         try:
-            # Leitura sem cache para garantir dependência estrita
+            # Leitura forçada para garantir sincronismo
             df_pedidos = conn.read(worksheet="Pedidos", ttl=0)
             
             # REGRA DE STATUS REQUERIDO (DEPENDÊNCIA DE PORTÃO)
@@ -171,20 +171,26 @@ if login():
                                "Aguardando Produção (G3)" if gate_id == "GATE 3" else \
                                "Aguardando Entrega (G4)"
 
-            # FILTRAGEM ESTERILIZADA: Só aparecem as CTRs que possuem itens no status requerido
-            ctrs_validas = df_pedidos[df_pedidos['Status_Atual'] == status_requerido]['CTR'].unique().tolist()
-            ctr_lista = [""] + sorted(ctrs_validas)
+            # FILTRAGEM DE CTRS COM DEPENDÊNCIA TOTAL
+            # Só aparecem as CTRs que possuem itens EXATAMENTE no status requerido
+            ctrs_com_itens_pendentes = df_pedidos[df_pedidos['Status_Atual'] == status_requerido]['CTR'].unique().tolist()
+            ctr_lista = [""] + sorted(ctrs_com_itens_pendentes)
             
             ctr_sel = st.selectbox(f"Selecione a CTR para {gate_id}", ctr_lista, key=f"ctr_gate_{aba}")
             
             if ctr_sel:
                 itens_pendentes = df_pedidos[(df_pedidos['CTR'] == ctr_sel) & (df_pedidos['Status_Atual'] == status_requerido)]
                 
+                # Se por algum motivo a lista for vazia (ex: atualização concorrente), exibe aviso
                 if itens_pendentes.empty:
-                    st.warning(f"Atenção: Todos os itens desta CTR já avançaram ou ainda não chegaram neste Portão.")
+                    st.info(f"Não há mais itens pendentes para o {gate_id} nesta CTR.")
                     return
 
-                selecionados = st.multiselect("Itens disponíveis para validação:", options=itens_pendentes['ID_Item'].tolist(), format_func=lambda x: f"{itens_pendentes[itens_pendentes['ID_Item'] == x]['Pedido'].iloc[0]} ({itens_pendentes[itens_pendentes['ID_Item'] == x]['Status_Atual'].iloc[0]})", default=itens_pendentes['ID_Item'].tolist(), key=f"multi_{aba}")
+                selecionados = st.multiselect("Itens disponíveis para validação:", 
+                                              options=itens_pendentes['ID_Item'].tolist(), 
+                                              format_func=lambda x: f"{itens_pendentes[itens_pendentes['ID_Item'] == x]['Pedido'].iloc[0]}", 
+                                              default=itens_pendentes['ID_Item'].tolist(), 
+                                              key=f"multi_{aba}")
                 
                 if selecionados:
                     pode_assinar = (papel_usuario == responsavel_r or papel_usuario == executor_e or papel_usuario == "Gerência Geral")
@@ -298,7 +304,7 @@ if login():
                 st.markdown("---")
         except Exception as e: st.error(f"Erro no monitor: {e}")
 
-    # --- EXECUÇÃO DOS GATES (DEPENDÊNCIA ESTREITA) ---
+    # --- GATES (A ORDEM FOI MANTIDA CONFORME SOLICITADO ANTERIORMENTE) ---
 
     elif menu == "✅ Gate 1: Aceite Técnico":
         itens = {"Informações Comerciais": ["Pedido registrado", "Cliente identificado", "Tipo de obra definido", "Responsável identificado"], "Escopo Técnico": ["Projeto mínimo recebido", "Ambientes definidos", "Materiais principais", "Itens fora do padrão"], "Prazo (prévia)": ["Prazo solicitado registrado", "Prazo avaliado", "Risco de prazo"], "Governança": ["Dono do Pedido definido", "PCP validou viabilidade", "Aprovado formalmente"]}
