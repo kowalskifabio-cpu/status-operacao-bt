@@ -162,7 +162,8 @@ if login():
         st.info(f"⚖️ **R:** {responsavel_r} | 🔨 **E:** {executor_e}")
         
         try:
-            df_pedidos = conn.read(worksheet="Pedidos", ttl="10s")
+            # Leitura sem cache para garantir dependência estrita
+            df_pedidos = conn.read(worksheet="Pedidos", ttl=0)
             
             # REGRA DE STATUS REQUERIDO (DEPENDÊNCIA DE PORTÃO)
             status_requerido = "Aguardando Gate 1" if gate_id == "GATE 1" else \
@@ -170,16 +171,20 @@ if login():
                                "Aguardando Produção (G3)" if gate_id == "GATE 3" else \
                                "Aguardando Entrega (G4)"
 
-            ctr_lista = [""] + sorted(df_pedidos['CTR'].unique().tolist())
+            # FILTRAGEM ESTERILIZADA: Só aparecem as CTRs que possuem itens no status requerido
+            ctrs_validas = df_pedidos[df_pedidos['Status_Atual'] == status_requerido]['CTR'].unique().tolist()
+            ctr_lista = [""] + sorted(ctrs_validas)
+            
             ctr_sel = st.selectbox(f"Selecione a CTR para {gate_id}", ctr_lista, key=f"ctr_gate_{aba}")
             
             if ctr_sel:
                 itens_pendentes = df_pedidos[(df_pedidos['CTR'] == ctr_sel) & (df_pedidos['Status_Atual'] == status_requerido)]
+                
                 if itens_pendentes.empty:
-                    st.success(f"Não há itens pendentes para o {gate_id} nesta CTR (Verifique se foram aprovados no portão anterior).")
+                    st.warning(f"Atenção: Todos os itens desta CTR já avançaram ou ainda não chegaram neste Portão.")
                     return
 
-                selecionados = st.multiselect("Itens disponíveis:", options=itens_pendentes['ID_Item'].tolist(), format_func=lambda x: itens_pendentes[itens_pendentes['ID_Item'] == x]['Pedido'].iloc[0], default=itens_pendentes['ID_Item'].tolist(), key=f"multi_{aba}")
+                selecionados = st.multiselect("Itens disponíveis para validação:", options=itens_pendentes['ID_Item'].tolist(), format_func=lambda x: f"{itens_pendentes[itens_pendentes['ID_Item'] == x]['Pedido'].iloc[0]} ({itens_pendentes[itens_pendentes['ID_Item'] == x]['Status_Atual'].iloc[0]})", default=itens_pendentes['ID_Item'].tolist(), key=f"multi_{aba}")
                 
                 if selecionados:
                     pode_assinar = (papel_usuario == responsavel_r or papel_usuario == executor_e or papel_usuario == "Gerência Geral")
@@ -229,7 +234,6 @@ if login():
         try:
             df_p = conn.read(worksheet="Pedidos", ttl=0)
             
-            # --- FILTROS NO DASHBOARD ---
             c_f1, c_f2 = st.columns(2)
             filtro_gestor = c_f1.multiselect("Filtrar por Gestor", sorted(df_p['Dono'].unique()))
             filtro_ctr = c_f2.multiselect("Filtrar por CTR", sorted(df_p['CTR'].unique()))
@@ -257,7 +261,7 @@ if login():
                             i_dias = (i_dt.date() - date.today()).days if pd.notnull(i_dt) else None
                             cor = "#28a745" if i_dias is not None and i_dias > 3 else "#FF0000" if i_dias is not None else "grey"
                             circulo = f'<span class="semaforo" style="background-color: {cor};"></span>'
-                            st.markdown(f"{circulo} **{item['Pedido']}** | 📅 {i_dt.strftime('%d/%m') if pd.notnull(i_dt) else 'S/D'}", unsafe_allow_html=True)
+                            st.markdown(f"{circulo} **{item['Pedido']}** | 📍 {item['Status_Atual']} | 📅 {i_dt.strftime('%d/%m') if pd.notnull(i_dt) else 'S/D'}", unsafe_allow_html=True)
                     
                     if dias is None: status_html = '<span style="color: grey;">⚪ SEM DATA</span>'
                     elif dias < 0: status_html = f'<div class="alerta-pulsante">❌ ATRASO CRÍTICO</div>'
@@ -271,8 +275,6 @@ if login():
         st.header("🚦 Monitor de Produção (Itens)")
         try:
             df_p = conn.read(worksheet="Pedidos", ttl=0)
-            
-            # --- FILTROS NO PAINEL DE ITENS ---
             c_f1, c_f2 = st.columns(2)
             filtro_gestor = c_f1.multiselect("Filtrar por Gestor", sorted(df_p['Dono'].unique()), key="f_gest_itens")
             filtro_ctr = c_f2.multiselect("Filtrar por CTR", sorted(df_p['CTR'].unique()), key="f_ctr_itens")
@@ -296,7 +298,7 @@ if login():
                 st.markdown("---")
         except Exception as e: st.error(f"Erro no monitor: {e}")
 
-    # --- EXECUÇÃO DOS GATES (ORDEM E REGRAS ATUALIZADAS) ---
+    # --- EXECUÇÃO DOS GATES (DEPENDÊNCIA ESTREITA) ---
 
     elif menu == "✅ Gate 1: Aceite Técnico":
         itens = {"Informações Comerciais": ["Pedido registrado", "Cliente identificado", "Tipo de obra definido", "Responsável identificado"], "Escopo Técnico": ["Projeto mínimo recebido", "Ambientes definidos", "Materiais principais", "Itens fora do padrão"], "Prazo (prévia)": ["Prazo solicitado registrado", "Prazo avaliado", "Risco de prazo"], "Governança": ["Dono do Pedido definido", "PCP validou viabilidade", "Aprovado formalmente"]}
@@ -313,8 +315,6 @@ if login():
     elif menu == "🚛 Gate 4: Entrega":
         itens = {"Produto": ["Produção concluída", "Qualidade conferida", "Separados por pedido"], "Logística": ["Checklist carga", "Frota definida", "Rota planejada"], "Prazo": ["Data validada", "Cliente informado", "Equipe montagem alinhada"]}
         checklist_gate("GATE 4", "Checklist_G4", itens, "Dono do Pedido (DP)", "Logística", "Erro acabamento ➡️ NÃO carrega", "CONCLUÍDO ✅", "Entrega perfeita", "Na carga")
-
-    # --- DEMAIS PÁGINAS (PRESERVADAS) ---
 
     elif menu == "📈 Indicadores de Performance":
         st.header("📈 Dashboard de Indicadores")
@@ -399,15 +399,11 @@ if login():
                                     df_save = df_p.drop(columns=['Data_Entrega_Str'])
                                     conn.update(worksheet="Pedidos", data=df_save)
                                     st.cache_data.clear()
-                                    
                                     df_alt = conn.read(worksheet="Alteracoes", ttl=0)
                                     logs = [{"Data": datetime.now().strftime("%d/%m/%Y %H:%M"), "Pedido": df_p[df_p['ID_Item']==id]['Pedido'].iloc[0], "CTR": ctr_sel, "Usuario": st.session_state.user_display, "O que mudou": f"LOTE: Data {nova_data} / Gestor {novo_gestor}. Motivo: {motivo}", "Impacto no Prazo": imp_prazo, "Impacto Financeiro": imp_financeiro} for id in selecionados]
                                     conn.update(worksheet="Alteracoes", data=pd.concat([df_alt, pd.DataFrame(logs)], ignore_index=True))
-                                    
-                                    st.success("✅ Pedido atualizado e sincronizado com sucesso!")
-                                    disparar_foguete()
-                                    time.sleep(1.5)
-                                    st.rerun()
+                                    st.success("✅ Pedido atualizado!")
+                                    disparar_foguete(); time.sleep(1.5); st.rerun()
             except Exception as e: st.error(f"Erro: {e}")
 
     elif menu == "📥 Importar Itens (Sistema)":
