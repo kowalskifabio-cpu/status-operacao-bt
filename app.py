@@ -147,12 +147,14 @@ if login():
         "🏭 Gate 3: Produção", 
         "🚛 Gate 4: Entrega", 
         "⚠️ Alteração de Pedido",
-        "📥 Importar Itens (Sistema)"
+        "📥 Importar Itens (Sistema)",
+        "🛠️ Recuperação de Pedidos"
     ]
 
     if papel_usuario == "Dono do Pedido (DP)":
         if "🚨 Auditoria" in opcoes_menu: opcoes_menu.remove("🚨 Auditoria")
         if "📈 Indicadores de Performance" in opcoes_menu: opcoes_menu.remove("📈 Indicadores de Performance")
+        if "🛠️ Recuperação de Pedidos" in opcoes_menu: opcoes_menu.remove("🛠️ Recuperação de Pedidos")
         
     menu = st.sidebar.radio("Navegação", opcoes_menu)
 
@@ -172,7 +174,6 @@ if login():
                                "Aguardando Entrega (G4)"
 
             # FILTRAGEM DE CTRS COM DEPENDÊNCIA TOTAL
-            # Só aparecem as CTRs que possuem itens EXATAMENTE no status requerido
             ctrs_com_itens_pendentes = df_pedidos[df_pedidos['Status_Atual'] == status_requerido]['CTR'].unique().tolist()
             ctr_lista = [""] + sorted(ctrs_com_itens_pendentes)
             
@@ -181,7 +182,6 @@ if login():
             if ctr_sel:
                 itens_pendentes = df_pedidos[(df_pedidos['CTR'] == ctr_sel) & (df_pedidos['Status_Atual'] == status_requerido)]
                 
-                # Se por algum motivo a lista for vazia (ex: atualização concorrente), exibe aviso
                 if itens_pendentes.empty:
                     st.info(f"Não há mais itens pendentes para o {gate_id} nesta CTR.")
                     return
@@ -193,7 +193,7 @@ if login():
                                               key=f"multi_{aba}")
                 
                 if selecionados:
-                    pode_assinar = (papel_usuario == responsavel_r or papel_usuario == executor_e or papel_usuario == "Gerência Geral")
+                    pode_assinar = (papel_usuario == responsavel_r or papel_usuario == responsavel_r or papel_usuario == "Gerência Geral")
                     if papel_usuario == "Consulta": pode_assinar = False
 
                     with st.form(f"form_batch_{aba}"):
@@ -239,23 +239,18 @@ if login():
         st.header("📉 Monitor de Produção por CTR")
         try:
             df_p = conn.read(worksheet="Pedidos", ttl=0)
-            
             c_f1, c_f2 = st.columns(2)
             filtro_gestor = c_f1.multiselect("Filtrar por Gestor", sorted(df_p['Dono'].unique()))
             filtro_ctr = c_f2.multiselect("Filtrar por CTR", sorted(df_p['CTR'].unique()))
-            
             if filtro_gestor: df_p = df_p[df_p['Dono'].isin(filtro_gestor)]
             if filtro_ctr: df_p = df_p[df_p['CTR'].isin(filtro_ctr)]
-            
             df_p['Data_Entrega_DT'] = pd.to_datetime(df_p['Data_Entrega'], errors='coerce')
             ctrs = df_p.groupby('CTR').agg({'ID_Item': 'count', 'Data_Entrega_DT': 'min', 'Dono': 'first'}).reset_index()
-            
             for _, row in ctrs.sort_values(by='Data_Entrega_DT').iterrows():
                 ctr_sel = row['CTR']
                 itens_obra = df_p[df_p['CTR'] == ctr_sel].copy()
                 total_itens = len(itens_obra)
                 dias = (row['Data_Entrega_DT'].date() - date.today()).days if pd.notnull(row['Data_Entrega_DT']) else None
-                
                 with st.container():
                     c1, c2, c3 = st.columns([4, 3, 3])
                     c1.markdown(f"### {ctr_sel}")
@@ -268,7 +263,6 @@ if login():
                             cor = "#28a745" if i_dias is not None and i_dias > 3 else "#FF0000" if i_dias is not None else "grey"
                             circulo = f'<span class="semaforo" style="background-color: {cor};"></span>'
                             st.markdown(f"{circulo} **{item['Pedido']}** | 📍 {item['Status_Atual']} | 📅 {i_dt.strftime('%d/%m') if pd.notnull(i_dt) else 'S/D'}", unsafe_allow_html=True)
-                    
                     if dias is None: status_html = '<span style="color: grey;">⚪ SEM DATA</span>'
                     elif dias < 0: status_html = f'<div class="alerta-pulsante">❌ ATRASO CRÍTICO</div>'
                     elif dias <= 3: status_html = f'<div class="alerta-pulsante">🔴 URGENTE</div>'
@@ -284,10 +278,8 @@ if login():
             c_f1, c_f2 = st.columns(2)
             filtro_gestor = c_f1.multiselect("Filtrar por Gestor", sorted(df_p['Dono'].unique()), key="f_gest_itens")
             filtro_ctr = c_f2.multiselect("Filtrar por CTR", sorted(df_p['CTR'].unique()), key="f_ctr_itens")
-            
             if filtro_gestor: df_p = df_p[df_p['Dono'].isin(filtro_gestor)]
             if filtro_ctr: df_p = df_p[df_p['CTR'].isin(filtro_ctr)]
-            
             df_p['Data_Entrega'] = pd.to_datetime(df_p['Data_Entrega'], errors='coerce')
             for idx, row in df_p.sort_values(by='Data_Entrega', na_position='last').iterrows():
                 dias = (row['Data_Entrega'].date() - date.today()).days if pd.notnull(row['Data_Entrega']) else None
@@ -303,8 +295,6 @@ if login():
                 with c4: st.markdown(status_html, unsafe_allow_html=True)
                 st.markdown("---")
         except Exception as e: st.error(f"Erro no monitor: {e}")
-
-    # --- GATES (A ORDEM FOI MANTIDA CONFORME SOLICITADO ANTERIORMENTE) ---
 
     elif menu == "✅ Gate 1: Aceite Técnico":
         itens = {"Informações Comerciais": ["Pedido registrado", "Cliente identificado", "Tipo de obra definido", "Responsável identificado"], "Escopo Técnico": ["Projeto mínimo recebido", "Ambientes definidos", "Materiais principais", "Itens fora do padrão"], "Prazo (prévia)": ["Prazo solicitado registrado", "Prazo avaliado", "Risco de prazo"], "Governança": ["Dono do Pedido definido", "PCP validou viabilidade", "Aprovado formalmente"]}
@@ -334,7 +324,6 @@ if login():
             ano_sel = c_f1.selectbox("Ano", anos if anos else [datetime.now().year])
             mes_sel_num = c_f2.selectbox("Mês", list(meses.keys()), format_func=lambda x: meses[x], index=datetime.now().month-1)
             df_aud_f = df_aud[(df_aud['DT_Filtro'].dt.year == ano_sel) & (df_aud['DT_Filtro'].dt.month == mes_sel_num)]
-            
             st.subheader("🚧 Fluxo de Itens por Portão")
             gates_count = df_p['Status_Atual'].value_counts()
             c_g1, c_g2, c_g3, c_g4, c_g5 = st.columns(5)
@@ -343,7 +332,6 @@ if login():
             c_g3.metric("Gate 3", gates_count.get("Aguardando Produção (G3)", 0))
             c_g4.metric("Gate 4", gates_count.get("Aguardando Entrega (G4)", 0))
             c_g5.metric("Concluídos", gates_count.get("CONCLUÍDO ✅", 0))
-            
             st.markdown("---")
             st.subheader(f"📊 Performance - {meses[mes_sel_num]}/{ano_sel}")
             df_p['Entrega_DT'] = pd.to_datetime(df_p['Data_Entrega'], errors='coerce')
@@ -351,7 +339,6 @@ if login():
             atrasados = len(itens_mes[(itens_mes['Entrega_DT'].dt.date < date.today()) & (itens_mes['Status_Atual'] != "CONCLUÍDO ✅")])
             no_prazo = len(itens_mes) - atrasados
             alterados_ids = df_aud_f[df_aud_f['O que mudou'].str.contains("LOTE:", na=False)]['Pedido'].unique()
-            
             m1, m2, m3 = st.columns(3)
             m1.metric("No Prazo", f"{no_prazo}")
             m2.metric("Atrasados", f"{atrasados}", delta_color="inverse")
@@ -376,11 +363,9 @@ if login():
                 df_p['Data_Entrega_Str'] = pd.to_datetime(df_p['Data_Entrega'], errors='coerce').dt.strftime('%Y-%m-%d').fillna('')
                 ctr_lista = [""] + sorted(df_p['CTR'].unique().tolist())
                 ctr_sel = st.selectbox("Selecione a CTR para Alteração", ctr_lista, key="ctr_alteracao")
-                
                 if ctr_sel:
                     itens_da_ctr = df_p[df_p['CTR'] == ctr_sel]
                     selecionados = st.multiselect("Selecione os itens:", options=itens_da_ctr['ID_Item'].tolist(), format_func=lambda x: f"{itens_da_ctr[itens_da_ctr['ID_Item'] == x]['Pedido'].iloc[0]}", default=itens_da_ctr['ID_Item'].tolist())
-                    
                     if selecionados:
                         with st.form("form_alteracao_lote"):
                             col1, col2 = st.columns(2)
@@ -390,13 +375,11 @@ if login():
                             try: data_sug = datetime.strptime(data_at, '%Y-%m-%d').date() if data_at else date.today()
                             except: data_sug = date.today()
                             nova_data = col2.date_input("Nova Data", value=data_sug)
-                            
                             st.markdown("#### ⚖️ Impactos da Alteração")
                             c_imp1, c_imp2 = st.columns(2)
                             imp_prazo = c_imp1.radio("Impacto no Prazo?", ["Não", "Sim"], horizontal=True)
                             imp_financeiro = c_imp2.radio("Impacto Financeiro?", ["Não", "Sim"], horizontal=True)
                             motivo = st.text_area("Motivo da Alteração")
-                            
                             if st.form_submit_button("APLICAR ALTERAÇÕES EM LOTE 🚀"):
                                 if not motivo: st.error("❌ Descreva o motivo")
                                 else:
@@ -432,3 +415,35 @@ if login():
                         if novos: conn.update(worksheet="Pedidos", data=pd.concat([df_base, pd.DataFrame(novos)], ignore_index=True)); st.success("Importado!")
                         st.cache_data.clear()
                 except Exception as e: st.error(f"Erro na importação: {e}")
+
+    # --- NOVA PÁGINA DE RECUPERAÇÃO ---
+    elif menu == "🛠️ Recuperação de Pedidos":
+        st.header("🛠️ Recuperação de Pedidos Órfãos")
+        st.warning("Use esta ferramenta para trazer pedidos parados em status antigos para o novo fluxo de Gates.")
+        try:
+            df_p = conn.read(worksheet="Pedidos", ttl=0)
+            # Define os status válidos do novo sistema
+            status_validos = ["Aguardando Gate 1", "Aguardando Materiais (G2)", "Aguardando Produção (G3)", "Aguardando Entrega (G4)", "CONCLUÍDO ✅"]
+            
+            # Filtra pedidos que não estão nos status válidos
+            orfaos = df_p[~df_p['Status_Atual'].isin(status_validos)]
+            
+            if orfaos.empty:
+                st.success("Todos os pedidos estão em status válidos do novo sistema!")
+            else:
+                st.write(f"Encontrados {len(orfaos)} itens fora do fluxo padrão:")
+                st.dataframe(orfaos[['ID_Item', 'Pedido', 'Status_Atual', 'CTR']])
+                
+                with st.form("form_recuperacao"):
+                    selecionados_rec = st.multiselect("Selecione os itens para mover:", options=orfaos['ID_Item'].tolist())
+                    novo_status_dest = st.selectbox("Mover para qual Gate?", status_validos)
+                    
+                    if st.form_submit_button("RECONECTAR AO FLUXO 🚀"):
+                        if selecionados_rec:
+                            df_p.loc[df_p['ID_Item'].isin(selecionados_rec), 'Status_Atual'] = novo_status_dest
+                            conn.update(worksheet="Pedidos", data=df_p)
+                            st.cache_data.clear()
+                            st.success(f"Itens movidos para {novo_status_dest}!")
+                            st.rerun()
+                        else: st.error("Selecione ao menos um item.")
+        except Exception as e: st.error(f"Erro na recuperação: {e}")
