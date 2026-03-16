@@ -145,7 +145,16 @@ if login():
         df['sort_num'] = df['Item'].apply(extrair_numero_item)
         return df.drop_duplicates(subset=['ID_Item'], keep='first')
 
+    @st.cache_data(ttl=60)
+    def load_historico():
+        try:
+            df = conn.read(worksheet="Pedidos_Concluidos")
+            return df
+        except:
+            return pd.DataFrame()
+
     df_global = load_pedidos()
+    df_concluidos_global = load_historico()
 
     def salvar_no_supabase(id_item, novo_status, row_dados=None):
         try:
@@ -204,7 +213,7 @@ if login():
         "📥 Importar Itens (Sistema)",
         "🛠️ Recuperação de Pedidos",
         "⚙️ SINCRONIZAÇÃO SUPABASE",
-        "🏁 Concluir Pedidos (Baixa)" # Nova aba solicitada
+        "🏁 Concluir Pedidos (Baixa)"
     ]
 
     if papel_usuario == "Dono do Pedido (DP)":
@@ -237,19 +246,15 @@ if login():
                     
                     if selecionados:
                         if st.button("🚀 DAR BAIXA E ARQUIVAR SELECIONADOS"):
-                            # 1. Carregar bases
                             df_pedidos = conn.read(worksheet="Pedidos", ttl=0)
                             try:
                                 df_historico = conn.read(worksheet="Pedidos_Concluidos", ttl=0)
                             except:
-                                # Se a aba não existir, cria com as colunas certas
                                 df_historico = pd.DataFrame(columns=df_pedidos.columns.tolist() + ["Data_Finalizacao", "Performance"])
                             
-                            # 2. Processar itens
                             rows_to_move = df_pedidos[df_pedidos['ID_Item'].isin(selecionados)].copy()
                             rows_to_move['Data_Finalizacao'] = datetime.now().strftime("%d/%m/%Y %H:%M")
                             
-                            # Lógica de Performance
                             hoje = date.today()
                             def calcular_performance(row):
                                 try:
@@ -259,14 +264,12 @@ if login():
                             
                             rows_to_move['Performance'] = rows_to_move.apply(calcular_performance, axis=1)
                             
-                            # 3. Salvar no histórico e remover da produção
                             df_final_hist = pd.concat([df_historico, rows_to_move], ignore_index=True)
                             df_final_pedidos = df_pedidos[~df_pedidos['ID_Item'].isin(selecionados)]
                             
                             conn.update(worksheet="Pedidos_Concluidos", data=df_final_hist)
                             conn.update(worksheet="Pedidos", data=df_final_pedidos)
                             
-                            # 4. Atualizar Supabase (Remover da produção ou marcar como arquivado)
                             for id_item in selecionados:
                                 try:
                                     supabase.table("pedidos").update({"status_atual": "ARQUIVADO"}).eq("id_item", id_item).execute()
@@ -354,6 +357,7 @@ if login():
             if filtro_ctr: df_p = df_p[df_p['CTR'].isin(filtro_ctr)]
             df_p['Data_Entrega_DT'] = pd.to_datetime(df_p['Data_Entrega'], errors='coerce')
             ctrs = df_p.groupby('CTR').agg({'ID_Item': 'count', 'Data_Entrega_DT': 'min', 'Dono': 'first'}).reset_index()
+            
             for _, row in ctrs.sort_values(by='Data_Entrega_DT').iterrows():
                 ctr_sel = row['CTR']
                 itens_obra = df_p[df_p['CTR'] == ctr_sel].sort_values(by='sort_num').copy()
@@ -377,6 +381,20 @@ if login():
                     else: status_html = '<div class="no-prazo">🟢 NO PRAZO</div>'
                     c3.markdown(status_html, unsafe_allow_html=True)
                     st.markdown("---")
+
+            # --- NOVA SEÇÃO: HISTÓRICO DE CONCLUÍDOS ---
+            if not df_concluidos_global.empty:
+                st.markdown("### 🏁 Histórico de Pedidos Concluídos")
+                with st.expander("Ver itens arquivados desta consulta"):
+                    df_c_filtro = df_concluidos_global.copy()
+                    if filtro_ctr: df_c_filtro = df_c_filtro[df_c_filtro['CTR'].isin(filtro_ctr)]
+                    if filtro_gestor: df_c_filtro = df_c_filtro[df_c_filtro['Dono'].isin(filtro_gestor)]
+                    
+                    if df_c_filtro.empty:
+                        st.info("Nenhum item concluído para os filtros selecionados.")
+                    else:
+                        st.dataframe(df_c_filtro[['CTR', 'Pedido', 'Dono', 'Data_Finalizacao', 'Performance']], use_container_width=True)
+
         except Exception as e: st.error(f"Erro no monitor: {e}")
 
     elif menu == "📊 Resumo e Prazos (Itens)":
@@ -402,6 +420,16 @@ if login():
                 with c3: st.write(f"📍 {row['Status_Atual']}\n📅 {row['Data_Entrega'].strftime('%d/%m/%Y') if pd.notnull(row['Data_Entrega']) else 'S/D'}")
                 with c4: st.markdown(status_html, unsafe_allow_html=True)
                 st.markdown("---")
+
+            # --- NOVA SEÇÃO: HISTÓRICO DE CONCLUÍDOS ---
+            if not df_concluidos_global.empty:
+                st.markdown("### 🏁 Itens Arquivados")
+                with st.expander("Clique para expandir o histórico de baixas"):
+                    df_c_filtro = df_concluidos_global.copy()
+                    if filtro_ctr: df_c_filtro = df_c_filtro[df_c_filtro['CTR'].isin(filtro_ctr)]
+                    if filtro_gestor: df_c_filtro = df_c_filtro[df_c_filtro['Dono'].isin(filtro_gestor)]
+                    st.dataframe(df_c_filtro[['CTR', 'Pedido', 'Data_Entrega', 'Data_Finalizacao', 'Performance']], use_container_width=True)
+
         except Exception as e: st.error(f"Erro no monitor: {e}")
 
     elif menu == "✅ Gate 1: Aceite Técnico":
@@ -533,6 +561,13 @@ if login():
                         else: st.warning("⚠️ Nenhum item novo encontrado.")
                         st.cache_data.clear()
                 except Exception as e: st.error(f"Erro na importação: {e}")
+
+    elif menu == "⚙️ SINCRONIZAÇÃO SUPABASE":
+        st.header("⚙️ Sincronização em Massa")
+        if st.button("🚀 FORÇAR SINCRONIZAÇÃO GERAL"):
+            for idx, row in df_global.iterrows():
+                salvar_no_supabase(row['ID_Item'], row['Status_Atual'], row)
+            st.success("Base do Supabase atualizada com sucesso!")
 
     elif menu == "🛠️ Recuperação de Pedidos":
         st.header("🛠️ Recuperação e Limpeza de Dados")
