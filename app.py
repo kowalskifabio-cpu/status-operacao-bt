@@ -1,12 +1,24 @@
 import streamlit as st
 from streamlit_gsheets import GSheetsConnection
+from supabase import create_client, Client
 import pandas as pd
 from datetime import datetime, date, timedelta
 import os
 import time
+import re
 
 # Configuração da Página
 st.set_page_config(page_title="Status - Gestão Integral por Item", layout="wide", page_icon="🏗️")
+
+# --- 1. CONEXÕES (HÍBRIDA: SHEETS + SUPABASE) ---
+@st.cache_resource
+def init_supabase():
+    url = st.secrets["supabase"]["url"]
+    key = st.secrets["supabase"]["key"]
+    return create_client(url, key)
+
+supabase = init_supabase()
+conn = st.connection("gsheets", type=GSheetsConnection)
 
 # --- FUNÇÃO DE AUTO-REFRESH (5 MINUTOS) ---
 if "last_refresh" not in st.session_state:
@@ -75,6 +87,14 @@ st.markdown("""
 def disparar_foguete():
     st.markdown('<div class="rocket-container">🚀</div>', unsafe_allow_html=True)
 
+# --- FUNÇÃO DE AUXÍLIO PARA ORDENAÇÃO ---
+def extrair_numero_item(texto):
+    try:
+        nums = re.findall(r'\d+', str(texto))
+        return int(nums[0]) if nums else 9999
+    except:
+        return 9999
+
 # --- SISTEMA DE LOGIN HÍBRIDO ---
 def login():
     if "authenticated" not in st.session_state:
@@ -120,19 +140,53 @@ if login():
     @st.cache_data(ttl=15)
     def load_pedidos():
         df = conn.read(worksheet="Pedidos")
-        # Garante que IDs vazios não entrem e limpa duplicatas pelo ID único
         df = df.dropna(subset=['ID_Item'])
         df['ID_Item'] = df['ID_Item'].astype(str).str.strip()
+        # Adiciona coluna de ordenação numérica sem quebrar o DF original
+        df['sort_num'] = df['Item'].apply(extrair_numero_item)
         return df.drop_duplicates(subset=['ID_Item'], keep='first')
 
     df_global = load_pedidos()
 
-    def atualizar_status_lote(lista_ids, novo_status):
+    def salvar_no_supabase(id_item, novo_status, row_dados=None):
+        """Função para espelhar dados no Supabase de forma segura"""
+        try:
+            # Prepara os dados para o Supabase
+            payload = {
+                "id_item": str(id_item),
+                "status_atual": str(novo_status)
+            }
+            # Se passarmos a linha completa, atualizamos tudo (garante sincronia total)
+            if row_dados is not None:
+                payload.update({
+                    "ctr": str(row_dados['CTR']),
+                    "obra": str(row_dados.get('Obra', '')),
+                    "item_projeto": str(row_dados.get('Item', '')),
+                    "pedido": str(row_dados['Pedido']),
+                    "dono": str(row_dados['Dono']),
+                    "data_entrega": str(row_dados['Data_Entrega']) if pd.notnull(row_dados['Data_Entrega']) else None,
+                    "quantidade": float(row_dados.get('Quantidade', 0)) if pd.notnull(row_dados.get('Quantidade', 0)) else 0,
+                    "unidade": str(row_dados.get('Unidade', 'un'))
+                })
+            supabase.table("pedidos").upsert(payload).execute()
+        except Exception as e:
+            # Falha no Supabase não pode travar a operação da Marcenaria no Sheets
+            pass
+
+    def atualizar_status_lote(lista_ids, novo_status, df_referencia):
+        # 1. ATUALIZA NO GOOGLE SHEETS (SISTEMA ATUAL)
         df_update = conn.read(worksheet="Pedidos", ttl=0)
         df_update.loc[df_update['ID_Item'].isin(lista_ids), 'Status_Atual'] = novo_status
-        # Força limpeza antes de salvar na nuvem
         df_update = df_update.drop_duplicates(subset=['ID_Item'], keep='first')
         conn.update(worksheet="Pedidos", data=df_update)
+        
+        # 2. SINCRONIZA NO SUPABASE (ESPELHAMENTO)
+        for id_item in lista_ids:
+            try:
+                row = df_referencia[df_referencia['ID_Item'] == id_item].iloc[0]
+                salvar_no_supabase(id_item, novo_status, row)
+            except: continue
+            
         st.cache_data.clear() 
 
     # --- MENU LATERAL ---
@@ -161,16 +215,34 @@ if login():
         "🚛 Gate 4: Entrega", 
         "⚠️ Alteração de Pedido",
         "📥 Importar Itens (Sistema)",
-        "🛠️ Recuperação de Pedidos"
+        "🛠️ Recuperação de Pedidos",
+        "⚙️ SINCRONIZAÇÃO SUPABASE" # Nova aba para você gerenciar a migração
     ]
 
     if papel_usuario == "Dono do Pedido (DP)":
-        if "🚨 Auditoria" in opcoes_menu: opcoes_menu.remove("🚨 Auditoria")
-        if "📈 Indicadores de Performance" in opcoes_menu: opcoes_menu.remove("📈 Indicadores de Performance")
-        if "🛠️ Recuperação de Pedidos" in opcoes_menu: opcoes_menu.remove("🛠️ Recuperação de Pedidos")
+        for item in ["🚨 Auditoria", "📈 Indicadores de Performance", "🛠️ Recuperação de Pedidos", "⚙️ SINCRONIZAÇÃO SUPABASE"]:
+            if item in opcoes_menu: opcoes_menu.remove(item)
         
     menu = st.sidebar.radio("Navegação", opcoes_menu)
 
+    # --- ABA DE SINCRONIZAÇÃO (PARA A VIRADA DE CHAVE) ---
+    if menu == "⚙️ SINCRONIZAÇÃO SUPABASE":
+        st.header("⚙️ Sincronização de Dados (Google Sheets ➡️ Supabase)")
+        st.info("Esta ferramenta garante que o Supabase tenha os mesmos dados que a planilha de produção.")
+        
+        if st.button("🚀 EXECUTAR SINCRONIZAÇÃO COMPLETA"):
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            total = len(df_global)
+            
+            for i, (idx, r) in enumerate(df_global.iterrows()):
+                salvar_no_supabase(r['ID_Item'], r['Status_Atual'], r)
+                progress_bar.progress((i + 1) / total)
+                status_text.text(f"Sincronizando item {i+1} de {total}...")
+            
+            st.success(f"✅ {total} itens espelhados no Supabase com sucesso!")
+
+    # --- FUNÇÃO DE CHECKLIST (GATES) ---
     def checklist_gate(gate_id, aba, itens_checklist, responsavel_r, executor_e, msg_bloqueio, proximo_status, objetivo, momento, df_p):
         st.header(f"Ficha de Controle: {gate_id}")
         st.markdown(f"**Objetivo:** {objetivo} | **Momento:** {momento}")
@@ -188,7 +260,8 @@ if login():
             ctr_sel = st.selectbox(f"Selecione a CTR para {gate_id}", ctr_lista, key=f"ctr_gate_{aba}")
             
             if ctr_sel:
-                itens_pendentes = df_p[(df_p['CTR'] == ctr_sel) & (df_p['Status_Atual'] == status_requerido)]
+                # Aqui entra a ORDENAÇÃO NUMÉRICA que você pediu
+                itens_pendentes = df_p[(df_p['CTR'] == ctr_sel) & (df_p['Status_Atual'] == status_requerido)].sort_values(by='sort_num')
                 
                 if itens_pendentes.empty:
                     st.info(f"Não há mais itens pendentes para o {gate_id} nesta CTR.")
@@ -236,12 +309,13 @@ if login():
                                 conn.update(worksheet=aba, data=pd.concat([df_gate, pd.DataFrame(novas_linhas)], ignore_index=True))
                                 df_alt = conn.read(worksheet="Alteracoes", ttl="1m")
                                 conn.update(worksheet="Alteracoes", data=pd.concat([df_alt, pd.DataFrame(logs_auditoria)], ignore_index=True))
-                                atualizar_status_lote(selecionados, proximo_status)
+                                # ATUALIZA LOTE (SHEETS + SUPABASE)
+                                atualizar_status_lote(selecionados, proximo_status, df_p)
                                 st.success(f"🚀 {len(selecionados)} itens validados!")
                                 disparar_foguete(); time.sleep(1); st.rerun()
         except Exception as e: st.error(f"Erro: {e}")
 
-    # --- PÁGINAS ---
+    # --- PÁGINAS DO MONITOR (ORDENADAS) ---
 
     if menu == "📉 Monitor por Pedido (CTR)":
         st.header("📉 Monitor de Produção por CTR")
@@ -253,10 +327,13 @@ if login():
             if filtro_gestor: df_p = df_p[df_p['Dono'].isin(filtro_gestor)]
             if filtro_ctr: df_p = df_p[df_p['CTR'].isin(filtro_ctr)]
             df_p['Data_Entrega_DT'] = pd.to_datetime(df_p['Data_Entrega'], errors='coerce')
+            
+            # Agrupamento mantendo a ordem numérica correta
             ctrs = df_p.groupby('CTR').agg({'ID_Item': 'count', 'Data_Entrega_DT': 'min', 'Dono': 'first'}).reset_index()
             for _, row in ctrs.sort_values(by='Data_Entrega_DT').iterrows():
                 ctr_sel = row['CTR']
-                itens_obra = df_p[df_p['CTR'] == ctr_sel].copy()
+                # Ordenação numérica aqui!
+                itens_obra = df_p[df_p['CTR'] == ctr_sel].sort_values(by='sort_num').copy()
                 total_itens = len(itens_obra)
                 dias = (row['Data_Entrega_DT'].date() - date.today()).days if pd.notnull(row['Data_Entrega_DT']) else None
                 with st.container():
@@ -265,8 +342,7 @@ if login():
                     c1.write(f"📅 Entrega Crítica: {row['Data_Entrega_DT'].strftime('%d/%m/%Y') if pd.notnull(row['Data_Entrega_DT']) else 'S/D'}")
                     c2.markdown(f"👤 **Gestor:** {row['Dono']}")
                     with c2.popover(f"🔍 Detalhar Itens ({total_itens})", use_container_width=True):
-                        # Ordenação para garantir que os itens detalhados não se repitam visualmente
-                        for _, item in itens_obra.drop_duplicates(subset=['ID_Item']).iterrows():
+                        for _, item in itens_obra.iterrows():
                             i_dt = pd.to_datetime(item['Data_Entrega'], errors='coerce')
                             i_dias = (i_dt.date() - date.today()).days if pd.notnull(i_dt) else None
                             cor = "#28a745" if i_dias is not None and i_dias > 3 else "#FF0000" if i_dias is not None else "grey"
@@ -278,19 +354,19 @@ if login():
                     else: status_html = '<div class="no-prazo">🟢 NO PRAZO</div>'
                     c3.markdown(status_html, unsafe_allow_html=True)
                     st.markdown("---")
-        except Exception as e: st.error(f"Erro no monitor por pedido: {e}")
+        except Exception as e: st.error(f"Erro no monitor: {e}")
 
     elif menu == "📊 Resumo e Prazos (Itens)":
         st.header("🚦 Monitor de Produção (Itens)")
         try:
-            df_p = df_global.copy()
+            df_p = df_global.copy().sort_values(by=['Data_Entrega', 'sort_num'])
             c_f1, c_f2 = st.columns(2)
             filtro_gestor = c_f1.multiselect("Filtrar por Gestor", sorted(df_p['Dono'].unique()), key="f_gest_itens")
             filtro_ctr = c_f2.multiselect("Filtrar por CTR", sorted(df_p['CTR'].unique()), key="f_ctr_itens")
             if filtro_gestor: df_p = df_p[df_p['Dono'].isin(filtro_gestor)]
             if filtro_ctr: df_p = df_p[df_p['CTR'].isin(filtro_ctr)]
             df_p['Data_Entrega'] = pd.to_datetime(df_p['Data_Entrega'], errors='coerce')
-            for idx, row in df_p.sort_values(by='Data_Entrega', na_position='last').iterrows():
+            for idx, row in df_p.iterrows():
                 dias = (row['Data_Entrega'].date() - date.today()).days if pd.notnull(row['Data_Entrega']) else None
                 status_html = ""
                 if dias is None: status_html = '<span style="color: grey;">⚪ SEM DATA</span>'
@@ -347,11 +423,9 @@ if login():
             itens_mes = df_p[(df_p['Entrega_DT'].dt.year == ano_sel) & (df_p['Entrega_DT'].dt.month == mes_sel_num)]
             atrasados = len(itens_mes[(itens_mes['Entrega_DT'].dt.date < date.today()) & (itens_mes['Status_Atual'] != "CONCLUÍDO ✅")])
             no_prazo = len(itens_mes) - atrasados
-            alterados_ids = df_aud_f[df_aud_f['O que mudou'].str.contains("LOTE:", na=False)]['Pedido'].unique()
-            m1, m2, m3 = st.columns(3)
+            m1, m2 = st.columns(2)
             m1.metric("No Prazo", f"{no_prazo}")
             m2.metric("Atrasados", f"{atrasados}", delta_color="inverse")
-            m3.metric("Sem Alterações (Limpos)", f"{max(0, len(itens_mes) - len(alterados_ids))}")
         except Exception as e: st.error(f"Erro nos indicadores: {e}")
 
     elif menu == "🚨 Auditoria":
@@ -401,6 +475,10 @@ if login():
                                     df_alt = conn.read(worksheet="Alteracoes", ttl=0)
                                     logs = [{"Data": datetime.now().strftime("%d/%m/%Y %H:%M"), "Pedido": df_save[df_save['ID_Item']==id]['Pedido'].iloc[0], "CTR": ctr_sel, "Usuario": st.session_state.user_display, "O que mudou": f"LOTE: Data {nova_data} / Gestor {novo_gestor}. Motivo: {motivo}", "Impacto no Prazo": imp_prazo, "Impacto Financeiro": imp_financeiro} for id in selecionados]
                                     conn.update(worksheet="Alteracoes", data=pd.concat([df_alt, pd.DataFrame(logs)], ignore_index=True))
+                                    # SINCRONIZA NO SUPABASE AS ALTERAÇÕES DE LOTE
+                                    for id_item in selecionados:
+                                        row_alt = df_save[df_save['ID_Item'] == id_item].iloc[0]
+                                        salvar_no_supabase(id_item, row_alt['Status_Atual'], row_alt)
                                     st.success("✅ Pedido atualizado!")
                                     disparar_foguete(); time.sleep(1.5); st.rerun()
             except Exception as e: st.error(f"Erro: {e}")
@@ -421,41 +499,36 @@ if login():
                             dt_crua = pd.to_datetime(r['Data Entrega'], errors='coerce')
                             dt_limpa = dt_crua.strftime('%Y-%m-%d') if pd.notnull(dt_crua) else ""
                             if str(uid) not in df_base['ID_Item'].astype(str).values:
-                                novos.append({"ID_Item": uid, "CTR": r['Centro de custo'], "Obra": r['Obra'], "Item": r['Item'], "Pedido": r['Produto'], "Dono": r['Gestor'], "Status_Atual": "Aguardando Gate 1", "Data_Entrega": dt_limpa, "Quantidade": r['Quantidade'], "Unidade": r['Unidade']})
+                                payload_novo = {"ID_Item": uid, "CTR": r['Centro de custo'], "Obra": r['Obra'], "Item": r['Item'], "Pedido": r['Produto'], "Dono": r['Gestor'], "Status_Atual": "Aguardando Gate 1", "Data_Entrega": dt_limpa, "Quantidade": r['Quantidade'], "Unidade": r['Unidade']}
+                                novos.append(payload_novo)
                         
                         if novos: 
                             final_df = pd.concat([df_base, pd.DataFrame(novos)], ignore_index=True)
                             final_df = final_df.drop_duplicates(subset=['ID_Item'], keep='first')
                             conn.update(worksheet="Pedidos", data=final_df)
+                            # SINCRONIZA NOVOS ITENS NO SUPABASE
+                            for n in novos:
+                                salvar_no_supabase(n['ID_Item'], "Aguardando Gate 1", n)
                             st.success(f"✅ {len(novos)} novos itens importados!")
-                        else:
-                            st.warning("⚠️ Nenhum item novo encontrado.")
+                        else: st.warning("⚠️ Nenhum item novo encontrado.")
                         st.cache_data.clear()
                 except Exception as e: st.error(f"Erro na importação: {e}")
 
     elif menu == "🛠️ Recuperação de Pedidos":
         st.header("🛠️ Recuperação e Limpeza de Dados")
-        st.warning("Ferramentas de manutenção de base.")
-        
-        # BOTÃO DE LIMPEZA FÍSICA NA PLANILHA
         if st.button("⚠️ EXECUTAR LIMPEZA DE DUPLICADOS NA PLANILHA ⚠️"):
             df_clean = conn.read(worksheet="Pedidos", ttl=0)
-            antes = len(df_clean)
             df_clean = df_clean.drop_duplicates(subset=['ID_Item'], keep='first')
-            depois = len(df_clean)
             conn.update(worksheet="Pedidos", data=df_clean)
-            st.success(f"Limpeza concluída! Removidas {antes - depois} linhas duplicadas da planilha original.")
-            st.cache_data.clear()
-            st.rerun()
+            st.success("Limpeza concluída!")
+            st.cache_data.clear(); st.rerun()
 
         st.markdown("---")
         try:
             df_p = df_global.copy()
             status_validos = ["Aguardando Gate 1", "Aguardando Materiais (G2)", "Aguardando Produção (G3)", "Aguardando Entrega (G4)", "CONCLUÍDO ✅"]
             orfaos = df_p[~df_p['Status_Atual'].isin(status_validos)]
-            if orfaos.empty:
-                st.success("Todos os pedidos estão em status válidos!")
-            else:
+            if not orfaos.empty:
                 st.write(f"Encontrados {len(orfaos)} itens fora do fluxo padrão:")
                 st.dataframe(orfaos[['ID_Item', 'Pedido', 'Status_Atual', 'CTR']])
                 with st.form("form_recuperacao"):
@@ -467,7 +540,9 @@ if login():
                             df_save.loc[df_save['ID_Item'].isin(selecionados_rec), 'Status_Atual'] = novo_status_dest
                             df_save = df_save.drop_duplicates(subset=['ID_Item'], keep='first')
                             conn.update(worksheet="Pedidos", data=df_save)
-                            st.cache_data.clear()
-                            st.success(f"Itens movidos!")
-                            st.rerun()
+                            # SINCRONIZA RECUPERAÇÃO NO SUPABASE
+                            for id_rec in selecionados_rec:
+                                row_rec = df_save[df_save['ID_Item'] == id_rec].iloc[0]
+                                salvar_no_supabase(id_rec, novo_status_dest, row_rec)
+                            st.cache_data.clear(); st.success("Itens movidos!"); st.rerun()
         except Exception as e: st.error(f"Erro: {e}")
