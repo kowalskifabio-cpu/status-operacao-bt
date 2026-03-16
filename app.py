@@ -149,10 +149,7 @@ if login():
 
     def salvar_no_supabase(id_item, novo_status, row_dados=None):
         try:
-            payload = {
-                "id_item": str(id_item),
-                "status_atual": str(novo_status)
-            }
+            payload = {"id_item": str(id_item), "status_atual": str(novo_status)}
             if row_dados is not None:
                 payload.update({
                     "ctr": str(row_dados['CTR']),
@@ -165,8 +162,7 @@ if login():
                     "unidade": str(row_dados.get('Unidade', 'un'))
                 })
             supabase.table("pedidos").upsert(payload).execute()
-        except Exception as e:
-            pass
+        except Exception as e: pass
 
     def atualizar_status_lote(lista_ids, novo_status, df_referencia):
         df_update = conn.read(worksheet="Pedidos", ttl=0)
@@ -207,25 +203,81 @@ if login():
         "⚠️ Alteração de Pedido",
         "📥 Importar Itens (Sistema)",
         "🛠️ Recuperação de Pedidos",
-        "⚙️ SINCRONIZAÇÃO SUPABASE"
+        "⚙️ SINCRONIZAÇÃO SUPABASE",
+        "🏁 Concluir Pedidos (Baixa)" # Nova aba solicitada
     ]
 
     if papel_usuario == "Dono do Pedido (DP)":
-        for item in ["🚨 Auditoria", "📈 Indicadores de Performance", "🛠️ Recuperação de Pedidos", "⚙️ SINCRONIZAÇÃO SUPABASE"]:
+        for item in ["🚨 Auditoria", "📈 Indicadores de Performance", "🛠️ Recuperação de Pedidos", "⚙️ SINCRONIZAÇÃO SUPABASE", "🏁 Concluir Pedidos (Baixa)"]:
             if item in opcoes_menu: opcoes_menu.remove(item)
         
     menu = st.sidebar.radio("Navegação", opcoes_menu)
 
-    if menu == "⚙️ SINCRONIZAÇÃO SUPABASE":
-        st.header("⚙️ Sincronização de Dados (Google Sheets ➡️ Supabase)")
-        if st.button("🚀 EXECUTAR SINCRONIZAÇÃO COMPLETA"):
-            progress_bar = st.progress(0)
-            total = len(df_global)
-            for i, (idx, r) in enumerate(df_global.iterrows()):
-                salvar_no_supabase(r['ID_Item'], r['Status_Atual'], r)
-                progress_bar.progress((i + 1) / total)
-            st.success(f"✅ {total} itens espelhados!")
+    # --- ABA: CONCLUIR PEDIDOS (BAIXA DEFINITIVA) ---
+    if menu == "🏁 Concluir Pedidos (Baixa)":
+        st.header("🏁 Baixa Definitiva de Pedidos")
+        st.info("Pedidos concluídos saem da lista de atrasados e vão para o histórico de entregas.")
+        
+        if papel_usuario not in ["Gerência Geral", "PCP"]:
+            st.error("Acesso restrito ao PCP e Gerência.")
+        else:
+            df_concluir = df_global[df_global['Status_Atual'] == "CONCLUÍDO ✅"]
+            if df_concluir.empty:
+                st.warning("Não há itens marcados como 'CONCLUÍDO ✅' para dar baixa no sistema.")
+            else:
+                ctr_lista = [""] + sorted(df_concluir['CTR'].unique().tolist())
+                ctr_sel = st.selectbox("Selecione a CTR para dar baixa:", ctr_lista)
+                
+                if ctr_sel:
+                    itens_baixa = df_concluir[df_concluir['CTR'] == ctr_sel]
+                    selecionados = st.multiselect("Selecione os itens para arquivar:", 
+                                                  options=itens_baixa['ID_Item'].tolist(), 
+                                                  format_func=lambda x: f"{itens_baixa[itens_baixa['ID_Item'] == x]['Pedido'].iloc[0]}",
+                                                  default=itens_baixa['ID_Item'].tolist())
+                    
+                    if selecionados:
+                        if st.button("🚀 DAR BAIXA E ARQUIVAR SELECIONADOS"):
+                            # 1. Carregar bases
+                            df_pedidos = conn.read(worksheet="Pedidos", ttl=0)
+                            try:
+                                df_historico = conn.read(worksheet="Pedidos_Concluidos", ttl=0)
+                            except:
+                                # Se a aba não existir, cria com as colunas certas
+                                df_historico = pd.DataFrame(columns=df_pedidos.columns.tolist() + ["Data_Finalizacao", "Performance"])
+                            
+                            # 2. Processar itens
+                            rows_to_move = df_pedidos[df_pedidos['ID_Item'].isin(selecionados)].copy()
+                            rows_to_move['Data_Finalizacao'] = datetime.now().strftime("%d/%m/%Y %H:%M")
+                            
+                            # Lógica de Performance
+                            hoje = date.today()
+                            def calcular_performance(row):
+                                try:
+                                    entrega = pd.to_datetime(row['Data_Entrega']).date()
+                                    return "NO PRAZO" if hoje <= entrega else "ATRASADO"
+                                except: return "S/D"
+                            
+                            rows_to_move['Performance'] = rows_to_move.apply(calcular_performance, axis=1)
+                            
+                            # 3. Salvar no histórico e remover da produção
+                            df_final_hist = pd.concat([df_historico, rows_to_move], ignore_index=True)
+                            df_final_pedidos = df_pedidos[~df_pedidos['ID_Item'].isin(selecionados)]
+                            
+                            conn.update(worksheet="Pedidos_Concluidos", data=df_final_hist)
+                            conn.update(worksheet="Pedidos", data=df_final_pedidos)
+                            
+                            # 4. Atualizar Supabase (Remover da produção ou marcar como arquivado)
+                            for id_item in selecionados:
+                                try:
+                                    supabase.table("pedidos").update({"status_atual": "ARQUIVADO"}).eq("id_item", id_item).execute()
+                                except: pass
+                            
+                            st.success(f"✅ {len(selecionados)} itens arquivados com sucesso!")
+                            st.cache_data.clear()
+                            time.sleep(1.5)
+                            st.rerun()
 
+    # --- FUNÇÃO DE CHECKLIST (GATES) ---
     def checklist_gate(gate_id, aba, itens_checklist, responsavel_r, executor_e, msg_bloqueio, proximo_status, objetivo, momento, df_p):
         st.header(f"Ficha de Controle: {gate_id}")
         st.markdown(f"**Objetivo:** {objetivo} | **Momento:** {momento}")
@@ -244,7 +296,7 @@ if login():
             if ctr_sel:
                 itens_pendentes = df_p[(df_p['CTR'] == ctr_sel) & (df_p['Status_Atual'] == status_requerido)].sort_values(by='sort_num')
                 if itens_pendentes.empty:
-                    st.info(f"Não há mais itens pendentes para o {gate_id} nesta CTR.")
+                    st.info(f"Não há mais itens pendentes.")
                     return
 
                 selecionados = st.multiselect("Itens disponíveis para validação:", 
@@ -265,36 +317,22 @@ if login():
                                 respostas[item] = st.checkbox(item, key=f"chk_{gate_id}_{aba}_{item.replace(' ', '_')}")
                         
                         obs = st.text_area("Observações Técnicas")
-                        btn_label = "VALIDAR LOTE SELECIONADO 🚀" if pode_assinar else "ACESSO APENAS PARA LEITURA"
-                        
-                        if st.form_submit_button(btn_label, disabled=not pode_assinar):
+                        if st.form_submit_button("VALIDAR LOTE SELECIONADO 🚀", disabled=not pode_assinar):
                             if not all(respostas.values()): st.error(f"❌ BLOQUEIO: {msg_bloqueio}")
                             else:
                                 df_gate = conn.read(worksheet=aba, ttl="1m")
                                 novas_linhas = []
                                 logs_auditoria = []
                                 for id_item in selecionados:
-                                    # CORREÇÃO AQUI: Garante que Validado_Por entre no dicionário final de dados da planilha
-                                    nova = {
-                                        "Data": datetime.now().strftime("%d/%m/%Y %H:%M"), 
-                                        "ID_Item": id_item, 
-                                        "Validado_Por": st.session_state.user_display, # Nome de quem aprova
-                                        "Obs": obs
-                                    }
-                                    nova.update(respostas)
-                                    novas_linhas.append(nova)
-                                    
+                                    nova = {"Data": datetime.now().strftime("%d/%m/%Y %H:%M"), "ID_Item": id_item, "Validado_Por": st.session_state.user_display, "Obs": obs}
+                                    nova.update(respostas); novas_linhas.append(nova)
                                     item_nome = itens_pendentes[itens_pendentes['ID_Item'] == id_item]['Pedido'].iloc[0]
                                     logs_auditoria.append({
                                         "Data": datetime.now().strftime("%d/%m/%Y %H:%M"),
-                                        "Pedido": item_nome,
-                                        "Usuario": st.session_state.user_display,
+                                        "Pedido": item_nome, "Usuario": st.session_state.user_display,
                                         "O que mudou": f"GATE: Avanço para {proximo_status}. Obs: {obs}",
-                                        "Impacto no Prazo": "Não",
-                                        "Impacto Financeiro": "Não",
-                                        "CTR": ctr_sel
+                                        "Impacto no Prazo": "Não", "Impacto Financeiro": "Não", "CTR": ctr_sel
                                     })
-                                
                                 conn.update(worksheet=aba, data=pd.concat([df_gate, pd.DataFrame(novas_linhas)], ignore_index=True))
                                 df_alt = conn.read(worksheet="Alteracoes", ttl="1m")
                                 conn.update(worksheet="Alteracoes", data=pd.concat([df_alt, pd.DataFrame(logs_auditoria)], ignore_index=True))
@@ -303,7 +341,7 @@ if login():
                                 disparar_foguete(); time.sleep(1); st.rerun()
         except Exception as e: st.error(f"Erro: {e}")
 
-    # --- PÁGINAS ---
+    # --- PÁGINAS DO MONITOR ---
 
     if menu == "📉 Monitor por Pedido (CTR)":
         st.header("📉 Monitor de Produção por CTR")
@@ -372,12 +410,10 @@ if login():
 
     elif menu == "💰 Gate 2: Material":
         itens = {"Materiais": ["Lista validada", "Quantidades conferidas", "Materiais especiais"], "Compras": ["Fornecedores definidos", "Lead times confirmados", "Datas registradas"], "Financeiro": ["Impacto caixa validado", "Compra autorizada", "Forma de pagamento"]}
-        # CORREÇÃO DE ABA: Gate 2 deve salvar em Checklist_G2 para manter ordem
         checklist_gate("GATE 2", "Checklist_G2", itens, "Financeiro", "Compras", "Falta material ➡️ PARADO", "Aguardando Produção (G3)", "Fábrica sem parada", "Na montagem", df_global)
 
     elif menu == "🏭 Gate 3: Produção":
         itens = {"Planejamento": ["Sequenciado", "Capacidade validada", "Gargalo identificado", "Gargalo protegido"], "Projeto": ["Projeto técnico liberado", "Medidas conferidas", "Versão registrada"], "Comunicação": ["Produção ciente", "Prazo interno registrado", "Alterações registradas"]}
-        # CORREÇÃO DE ABA: Gate 3 deve salvar em Checklist_G3
         checklist_gate("GATE 3", "Checklist_G3", itens, "PCP", "Produção", "Sem plano ➡️ BLOQUEADO", "Aguardando Entrega (G4)", "Produzir planejado", "No corte", df_global)
 
     elif menu == "🚛 Gate 4: Entrega":
@@ -506,26 +542,3 @@ if login():
             conn.update(worksheet="Pedidos", data=df_clean)
             st.success("Limpeza concluída!")
             st.cache_data.clear(); st.rerun()
-
-        st.markdown("---")
-        try:
-            df_p = df_global.copy()
-            status_validos = ["Aguardando Gate 1", "Aguardando Materiais (G2)", "Aguardando Produção (G3)", "Aguardando Entrega (G4)", "CONCLUÍDO ✅"]
-            orfaos = df_p[~df_p['Status_Atual'].isin(status_validos)]
-            if not orfaos.empty:
-                st.write(f"Encontrados {len(orfaos)} itens fora do fluxo padrão:")
-                st.dataframe(orfaos[['ID_Item', 'Pedido', 'Status_Atual', 'CTR']])
-                with st.form("form_recuperacao"):
-                    selecionados_rec = st.multiselect("Selecione os itens:", options=orfaos['ID_Item'].tolist())
-                    novo_status_dest = st.selectbox("Mover para:", status_validos)
-                    if st.form_submit_button("RECONECTAR AO FLUXO 🚀"):
-                        if selecionados_rec:
-                            df_save = conn.read(worksheet="Pedidos", ttl=0)
-                            df_save.loc[df_save['ID_Item'].isin(selecionados_rec), 'Status_Atual'] = novo_status_dest
-                            df_save = df_save.drop_duplicates(subset=['ID_Item'], keep='first')
-                            conn.update(worksheet="Pedidos", data=df_save)
-                            for id_rec in selecionados_rec:
-                                row_rec = df_save[df_save['ID_Item'] == id_rec].iloc[0]
-                                salvar_no_supabase(id_rec, novo_status_dest, row_rec)
-                            st.cache_data.clear(); st.success("Itens movidos!"); st.rerun()
-        except Exception as e: st.error(f"Erro: {e}")
