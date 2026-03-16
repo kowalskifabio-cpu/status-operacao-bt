@@ -136,7 +136,6 @@ def login():
 if login():
     conn = st.connection("gsheets", type=GSheetsConnection)
     
-    # LEITURA COM FILTRO RADICAL DE DUPLICADOS
     @st.cache_data(ttl=15)
     def load_pedidos():
         df = conn.read(worksheet="Pedidos")
@@ -382,18 +381,14 @@ if login():
                     c3.markdown(status_html, unsafe_allow_html=True)
                     st.markdown("---")
 
-            # --- NOVA SEÇÃO: HISTÓRICO DE CONCLUÍDOS ---
             if not df_concluidos_global.empty:
                 st.markdown("### 🏁 Histórico de Pedidos Concluídos")
                 with st.expander("Ver itens arquivados desta consulta"):
                     df_c_filtro = df_concluidos_global.copy()
                     if filtro_ctr: df_c_filtro = df_c_filtro[df_c_filtro['CTR'].isin(filtro_ctr)]
                     if filtro_gestor: df_c_filtro = df_c_filtro[df_c_filtro['Dono'].isin(filtro_gestor)]
-                    
-                    if df_c_filtro.empty:
-                        st.info("Nenhum item concluído para os filtros selecionados.")
-                    else:
-                        st.dataframe(df_c_filtro[['CTR', 'Pedido', 'Dono', 'Data_Finalizacao', 'Performance']], use_container_width=True)
+                    if df_c_filtro.empty: st.info("Nenhum item concluído para os filtros.")
+                    else: st.dataframe(df_c_filtro[['CTR', 'Pedido', 'Dono', 'Data_Finalizacao', 'Performance']], use_container_width=True)
 
         except Exception as e: st.error(f"Erro no monitor: {e}")
 
@@ -421,7 +416,6 @@ if login():
                 with c4: st.markdown(status_html, unsafe_allow_html=True)
                 st.markdown("---")
 
-            # --- NOVA SEÇÃO: HISTÓRICO DE CONCLUÍDOS ---
             if not df_concluidos_global.empty:
                 st.markdown("### 🏁 Itens Arquivados")
                 with st.expander("Clique para expandir o histórico de baixas"):
@@ -448,18 +442,21 @@ if login():
         itens = {"Produto": ["Produção concluída", "Qualidade conferida", "Separados por pedido"], "Logística": ["Checklist carga", "Frota definida", "Rota planejada"], "Prazo": ["Data validada", "Cliente informado", "Equipe montagem alinhada"]}
         checklist_gate("GATE 4", "Checklist_G4", itens, "Dono do Pedido (DP)", "Logística", "Erro acabamento ➡️ NÃO carrega", "CONCLUÍDO ✅", "Entrega perfeita", "Na carga", df_global)
 
+    # --- ABA: INDICADORES (COM FILTRO GESTOR E PERFORMANCE) ---
     elif menu == "📈 Indicadores de Performance":
         st.header("📈 Dashboard de Indicadores")
         try:
             df_p = df_global.copy()
-            df_aud = conn.read(worksheet="Alteracoes", ttl="10m")
-            df_aud['DT_Filtro'] = pd.to_datetime(df_aud['Data'], format="%d/%m/%Y %H:%M", errors='coerce')
-            anos = sorted(df_aud['DT_Filtro'].dt.year.dropna().unique().tolist(), reverse=True)
-            meses = {1: "Janeiro", 2: "Fevereiro", 3: "Março", 4: "Abril", 5: "Maio", 6: "Junho", 7: "Julho", 8: "Agosto", 9: "Setembro", 10: "Outubro", 11: "Novembro", 12: "Dezembro"}
-            c_f1, c_f2 = st.columns(2)
-            ano_sel = c_f1.selectbox("Ano", anos if anos else [datetime.now().year])
-            mes_sel_num = c_f2.selectbox("Mês", list(meses.keys()), format_func=lambda x: meses[x], index=datetime.now().month-1)
-            df_aud_f = df_aud[(df_aud['DT_Filtro'].dt.year == ano_sel) & (df_aud['DT_Filtro'].dt.month == mes_sel_num)]
+            df_h = df_concluidos_global.copy()
+            
+            # FILTRO POR GESTOR (BI)
+            todos_gestores = sorted(list(set(df_p['Dono'].unique()) | set(df_h['Dono'].unique() if not df_h.empty else [])))
+            gestor_sel = st.multiselect("🔍 Filtrar por Dono do Pedido", todos_gestores, key="filtro_bi_gestor")
+            
+            if gestor_sel:
+                df_p = df_p[df_p['Dono'].isin(gestor_sel)]
+                if not df_h.empty: df_h = df_h[df_h['Dono'].isin(gestor_sel)]
+
             st.subheader("🚧 Fluxo de Itens por Portão")
             gates_count = df_p['Status_Atual'].value_counts()
             c_g1, c_g2, c_g3, c_g4, c_g5 = st.columns(5)
@@ -468,15 +465,20 @@ if login():
             c_g3.metric("Gate 3", gates_count.get("Aguardando Produção (G3)", 0))
             c_g4.metric("Gate 4", gates_count.get("Aguardando Entrega (G4)", 0))
             c_g5.metric("Concluídos", gates_count.get("CONCLUÍDO ✅", 0))
+
             st.markdown("---")
-            st.subheader(f"📊 Performance - {meses[mes_sel_num]}/{ano_sel}")
-            df_p['Entrega_DT'] = pd.to_datetime(df_p['Data_Entrega'], errors='coerce')
-            itens_mes = df_p[(df_p['Entrega_DT'].dt.year == ano_sel) & (df_p['Entrega_DT'].dt.month == mes_sel_num)]
-            atrasados = len(itens_mes[(itens_mes['Entrega_DT'].dt.date < date.today()) & (itens_mes['Status_Atual'] != "CONCLUÍDO ✅")])
-            no_prazo = len(itens_mes) - atrasados
-            m1, m2 = st.columns(2)
-            m1.metric("No Prazo", f"{no_prazo}")
-            m2.metric("Atrasados", f"{atrasados}", delta_color="inverse")
+            st.subheader("📊 Performance de Entregas (Arquivados)")
+            if df_h.empty: st.info("Sem dados históricos para este filtro.")
+            else:
+                perf_counts = df_h['Performance'].value_counts()
+                c_graf1, c_graf2 = st.columns(2)
+                with c_graf1: 
+                    st.write("**Eficiência de Prazo**")
+                    st.bar_chart(perf_counts)
+                with c_graf2:
+                    taxa = (perf_counts.get("NO PRAZO", 0) / len(df_h) * 100) if len(df_h) > 0 else 0
+                    st.metric("Taxa de Eficiência", f"{taxa:.1f}%")
+                    st.write(f"Total: {len(df_h)} | ✅ No Prazo: {perf_counts.get('NO PRAZO', 0)} | ❌ Atraso: {perf_counts.get('ATRASADO', 0)}")
         except Exception as e: st.error(f"Erro nos indicadores: {e}")
 
     elif menu == "🚨 Auditoria":
@@ -535,7 +537,7 @@ if login():
 
     elif menu == "📥 Importar Itens (Sistema)":
         st.header("📥 Importar Itens da Marcenaria")
-        if papel_usuario not in ["Gerência Geral", "PCP"]: st.error("Apenas PCP ou Gerência podem importar novos dados.")
+        if papel_usuario not in ["Gerência Geral", "PCP"]: st.error("Acesso negado.")
         else:
             up = st.file_uploader("Arquivo egsDataGrid", type=["csv", "xlsx"])
             if up:
