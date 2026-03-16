@@ -142,21 +142,17 @@ if login():
         df = conn.read(worksheet="Pedidos")
         df = df.dropna(subset=['ID_Item'])
         df['ID_Item'] = df['ID_Item'].astype(str).str.strip()
-        # Adiciona coluna de ordenação numérica sem quebrar o DF original
         df['sort_num'] = df['Item'].apply(extrair_numero_item)
         return df.drop_duplicates(subset=['ID_Item'], keep='first')
 
     df_global = load_pedidos()
 
     def salvar_no_supabase(id_item, novo_status, row_dados=None):
-        """Função para espelhar dados no Supabase de forma segura"""
         try:
-            # Prepara os dados para o Supabase
             payload = {
                 "id_item": str(id_item),
                 "status_atual": str(novo_status)
             }
-            # Se passarmos a linha completa, atualizamos tudo (garante sincronia total)
             if row_dados is not None:
                 payload.update({
                     "ctr": str(row_dados['CTR']),
@@ -170,23 +166,18 @@ if login():
                 })
             supabase.table("pedidos").upsert(payload).execute()
         except Exception as e:
-            # Falha no Supabase não pode travar a operação da Marcenaria no Sheets
             pass
 
     def atualizar_status_lote(lista_ids, novo_status, df_referencia):
-        # 1. ATUALIZA NO GOOGLE SHEETS (SISTEMA ATUAL)
         df_update = conn.read(worksheet="Pedidos", ttl=0)
         df_update.loc[df_update['ID_Item'].isin(lista_ids), 'Status_Atual'] = novo_status
         df_update = df_update.drop_duplicates(subset=['ID_Item'], keep='first')
         conn.update(worksheet="Pedidos", data=df_update)
-        
-        # 2. SINCRONIZA NO SUPABASE (ESPELHAMENTO)
         for id_item in lista_ids:
             try:
                 row = df_referencia[df_referencia['ID_Item'] == id_item].iloc[0]
                 salvar_no_supabase(id_item, novo_status, row)
             except: continue
-            
         st.cache_data.clear() 
 
     # --- MENU LATERAL ---
@@ -216,7 +207,7 @@ if login():
         "⚠️ Alteração de Pedido",
         "📥 Importar Itens (Sistema)",
         "🛠️ Recuperação de Pedidos",
-        "⚙️ SINCRONIZAÇÃO SUPABASE" # Nova aba para você gerenciar a migração
+        "⚙️ SINCRONIZAÇÃO SUPABASE"
     ]
 
     if papel_usuario == "Dono do Pedido (DP)":
@@ -225,24 +216,16 @@ if login():
         
     menu = st.sidebar.radio("Navegação", opcoes_menu)
 
-    # --- ABA DE SINCRONIZAÇÃO (PARA A VIRADA DE CHAVE) ---
     if menu == "⚙️ SINCRONIZAÇÃO SUPABASE":
         st.header("⚙️ Sincronização de Dados (Google Sheets ➡️ Supabase)")
-        st.info("Esta ferramenta garante que o Supabase tenha os mesmos dados que a planilha de produção.")
-        
         if st.button("🚀 EXECUTAR SINCRONIZAÇÃO COMPLETA"):
             progress_bar = st.progress(0)
-            status_text = st.empty()
             total = len(df_global)
-            
             for i, (idx, r) in enumerate(df_global.iterrows()):
                 salvar_no_supabase(r['ID_Item'], r['Status_Atual'], r)
                 progress_bar.progress((i + 1) / total)
-                status_text.text(f"Sincronizando item {i+1} de {total}...")
-            
-            st.success(f"✅ {total} itens espelhados no Supabase com sucesso!")
+            st.success(f"✅ {total} itens espelhados!")
 
-    # --- FUNÇÃO DE CHECKLIST (GATES) ---
     def checklist_gate(gate_id, aba, itens_checklist, responsavel_r, executor_e, msg_bloqueio, proximo_status, objetivo, momento, df_p):
         st.header(f"Ficha de Controle: {gate_id}")
         st.markdown(f"**Objetivo:** {objetivo} | **Momento:** {momento}")
@@ -256,13 +239,10 @@ if login():
 
             ctrs_com_itens_pendentes = df_p[df_p['Status_Atual'] == status_requerido]['CTR'].unique().tolist()
             ctr_lista = [""] + sorted(ctrs_com_itens_pendentes)
-            
             ctr_sel = st.selectbox(f"Selecione a CTR para {gate_id}", ctr_lista, key=f"ctr_gate_{aba}")
             
             if ctr_sel:
-                # Aqui entra a ORDENAÇÃO NUMÉRICA que você pediu
                 itens_pendentes = df_p[(df_p['CTR'] == ctr_sel) & (df_p['Status_Atual'] == status_requerido)].sort_values(by='sort_num')
-                
                 if itens_pendentes.empty:
                     st.info(f"Não há mais itens pendentes para o {gate_id} nesta CTR.")
                     return
@@ -294,8 +274,16 @@ if login():
                                 novas_linhas = []
                                 logs_auditoria = []
                                 for id_item in selecionados:
-                                    nova = {"Data": datetime.now().strftime("%d/%m/%Y %H:%M"), "ID_Item": id_item, "Validado_Por": st.session_state.user_display, "Obs": obs}
-                                    nova.update(respostas); novas_linhas.append(nova)
+                                    # CORREÇÃO AQUI: Garante que Validado_Por entre no dicionário final de dados da planilha
+                                    nova = {
+                                        "Data": datetime.now().strftime("%d/%m/%Y %H:%M"), 
+                                        "ID_Item": id_item, 
+                                        "Validado_Por": st.session_state.user_display, # Nome de quem aprova
+                                        "Obs": obs
+                                    }
+                                    nova.update(respostas)
+                                    novas_linhas.append(nova)
+                                    
                                     item_nome = itens_pendentes[itens_pendentes['ID_Item'] == id_item]['Pedido'].iloc[0]
                                     logs_auditoria.append({
                                         "Data": datetime.now().strftime("%d/%m/%Y %H:%M"),
@@ -306,16 +294,16 @@ if login():
                                         "Impacto Financeiro": "Não",
                                         "CTR": ctr_sel
                                     })
+                                
                                 conn.update(worksheet=aba, data=pd.concat([df_gate, pd.DataFrame(novas_linhas)], ignore_index=True))
                                 df_alt = conn.read(worksheet="Alteracoes", ttl="1m")
                                 conn.update(worksheet="Alteracoes", data=pd.concat([df_alt, pd.DataFrame(logs_auditoria)], ignore_index=True))
-                                # ATUALIZA LOTE (SHEETS + SUPABASE)
                                 atualizar_status_lote(selecionados, proximo_status, df_p)
                                 st.success(f"🚀 {len(selecionados)} itens validados!")
                                 disparar_foguete(); time.sleep(1); st.rerun()
         except Exception as e: st.error(f"Erro: {e}")
 
-    # --- PÁGINAS DO MONITOR (ORDENADAS) ---
+    # --- PÁGINAS ---
 
     if menu == "📉 Monitor por Pedido (CTR)":
         st.header("📉 Monitor de Produção por CTR")
@@ -327,12 +315,9 @@ if login():
             if filtro_gestor: df_p = df_p[df_p['Dono'].isin(filtro_gestor)]
             if filtro_ctr: df_p = df_p[df_p['CTR'].isin(filtro_ctr)]
             df_p['Data_Entrega_DT'] = pd.to_datetime(df_p['Data_Entrega'], errors='coerce')
-            
-            # Agrupamento mantendo a ordem numérica correta
             ctrs = df_p.groupby('CTR').agg({'ID_Item': 'count', 'Data_Entrega_DT': 'min', 'Dono': 'first'}).reset_index()
             for _, row in ctrs.sort_values(by='Data_Entrega_DT').iterrows():
                 ctr_sel = row['CTR']
-                # Ordenação numérica aqui!
                 itens_obra = df_p[df_p['CTR'] == ctr_sel].sort_values(by='sort_num').copy()
                 total_itens = len(itens_obra)
                 dias = (row['Data_Entrega_DT'].date() - date.today()).days if pd.notnull(row['Data_Entrega_DT']) else None
@@ -387,11 +372,13 @@ if login():
 
     elif menu == "💰 Gate 2: Material":
         itens = {"Materiais": ["Lista validada", "Quantidades conferidas", "Materiais especiais"], "Compras": ["Fornecedores definidos", "Lead times confirmados", "Datas registradas"], "Financeiro": ["Impacto caixa validado", "Compra autorizada", "Forma de pagamento"]}
-        checklist_gate("GATE 2", "Checklist_G3", itens, "Financeiro", "Compras", "Falta material ➡️ PARADO", "Aguardando Produção (G3)", "Fábrica sem parada", "Na montagem", df_global)
+        # CORREÇÃO DE ABA: Gate 2 deve salvar em Checklist_G2 para manter ordem
+        checklist_gate("GATE 2", "Checklist_G2", itens, "Financeiro", "Compras", "Falta material ➡️ PARADO", "Aguardando Produção (G3)", "Fábrica sem parada", "Na montagem", df_global)
 
     elif menu == "🏭 Gate 3: Produção":
         itens = {"Planejamento": ["Sequenciado", "Capacidade validada", "Gargalo identificado", "Gargalo protegido"], "Projeto": ["Projeto técnico liberado", "Medidas conferidas", "Versão registrada"], "Comunicação": ["Produção ciente", "Prazo interno registrado", "Alterações registradas"]}
-        checklist_gate("GATE 3", "Checklist_G2", itens, "PCP", "Produção", "Sem plano ➡️ BLOQUEADO", "Aguardando Entrega (G4)", "Produzir planejado", "No corte", df_global)
+        # CORREÇÃO DE ABA: Gate 3 deve salvar em Checklist_G3
+        checklist_gate("GATE 3", "Checklist_G3", itens, "PCP", "Produção", "Sem plano ➡️ BLOQUEADO", "Aguardando Entrega (G4)", "Produzir planejado", "No corte", df_global)
 
     elif menu == "🚛 Gate 4: Entrega":
         itens = {"Produto": ["Produção concluída", "Qualidade conferida", "Separados por pedido"], "Logística": ["Checklist carga", "Frota definida", "Rota planejada"], "Prazo": ["Data validada", "Cliente informado", "Equipe montagem alinhada"]}
@@ -475,7 +462,6 @@ if login():
                                     df_alt = conn.read(worksheet="Alteracoes", ttl=0)
                                     logs = [{"Data": datetime.now().strftime("%d/%m/%Y %H:%M"), "Pedido": df_save[df_save['ID_Item']==id]['Pedido'].iloc[0], "CTR": ctr_sel, "Usuario": st.session_state.user_display, "O que mudou": f"LOTE: Data {nova_data} / Gestor {novo_gestor}. Motivo: {motivo}", "Impacto no Prazo": imp_prazo, "Impacto Financeiro": imp_financeiro} for id in selecionados]
                                     conn.update(worksheet="Alteracoes", data=pd.concat([df_alt, pd.DataFrame(logs)], ignore_index=True))
-                                    # SINCRONIZA NO SUPABASE AS ALTERAÇÕES DE LOTE
                                     for id_item in selecionados:
                                         row_alt = df_save[df_save['ID_Item'] == id_item].iloc[0]
                                         salvar_no_supabase(id_item, row_alt['Status_Atual'], row_alt)
@@ -501,12 +487,10 @@ if login():
                             if str(uid) not in df_base['ID_Item'].astype(str).values:
                                 payload_novo = {"ID_Item": uid, "CTR": r['Centro de custo'], "Obra": r['Obra'], "Item": r['Item'], "Pedido": r['Produto'], "Dono": r['Gestor'], "Status_Atual": "Aguardando Gate 1", "Data_Entrega": dt_limpa, "Quantidade": r['Quantidade'], "Unidade": r['Unidade']}
                                 novos.append(payload_novo)
-                        
                         if novos: 
                             final_df = pd.concat([df_base, pd.DataFrame(novos)], ignore_index=True)
                             final_df = final_df.drop_duplicates(subset=['ID_Item'], keep='first')
                             conn.update(worksheet="Pedidos", data=final_df)
-                            # SINCRONIZA NOVOS ITENS NO SUPABASE
                             for n in novos:
                                 salvar_no_supabase(n['ID_Item'], "Aguardando Gate 1", n)
                             st.success(f"✅ {len(novos)} novos itens importados!")
@@ -540,7 +524,6 @@ if login():
                             df_save.loc[df_save['ID_Item'].isin(selecionados_rec), 'Status_Atual'] = novo_status_dest
                             df_save = df_save.drop_duplicates(subset=['ID_Item'], keep='first')
                             conn.update(worksheet="Pedidos", data=df_save)
-                            # SINCRONIZA RECUPERAÇÃO NO SUPABASE
                             for id_rec in selecionados_rec:
                                 row_rec = df_save[df_save['ID_Item'] == id_rec].iloc[0]
                                 salvar_no_supabase(id_rec, novo_status_dest, row_rec)
