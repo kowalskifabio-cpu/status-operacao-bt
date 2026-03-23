@@ -207,10 +207,10 @@ if login():
         "📊 Resumo e Prazos (Itens)", 
         "📈 Indicadores de Performance", 
         "🚨 Auditoria", 
-        "🛠️ Portão de Retrabalho", # NOVO
+        "🛠️ Portão de Retrabalho",
         "✅ Gate 1: Aceite Técnico", 
         "💰 Gate 2: Material", 
-        "🏭 Gate 3: Produção", 
+        "🏭 Gate 3: Production", 
         "🚛 Gate 4: Entrega", 
         "⚠️ Alteração de Pedido",
         "📥 Importar Itens (Sistema)",
@@ -330,12 +330,16 @@ if login():
                                 novas_linhas = []
                                 logs_auditoria = []
                                 for id_item in selecionados:
+                                    # CAPTURA O DONO DO ITEM PARA A AUDITORIA
+                                    dono_item = itens_pendentes[itens_pendentes['ID_Item'] == id_item]['Dono'].iloc[0]
+                                    
                                     nova = {"Data": datetime.now().strftime("%d/%m/%Y %H:%M"), "ID_Item": id_item, "Validado_Por": st.session_state.user_display, "Obs": obs}
                                     nova.update(respostas); novas_linhas.append(nova)
                                     item_nome = itens_pendentes[itens_pendentes['ID_Item'] == id_item]['Pedido'].iloc[0]
                                     logs_auditoria.append({
                                         "Data": datetime.now().strftime("%d/%m/%Y %H:%M"),
                                         "Pedido": item_nome, "Usuario": st.session_state.user_display,
+                                        "Dono": dono_item,
                                         "O que mudou": f"GATE: Avanço para {proximo_status}. Obs: {obs}",
                                         "Impacto no Prazo": "Não", "Impacto Financeiro": "Não", "CTR": ctr_sel
                                     })
@@ -379,18 +383,27 @@ if login():
                             circulo = f'<span class="semaforo" style="background-color: {cor};"></span>'
                             st.markdown(f"{circulo} **{item['Pedido']}** | 📍 {item['Status_Atual']} | 📅 {i_dt.strftime('%d/%m') if pd.notnull(i_dt) else 'S/D'}", unsafe_allow_html=True)
                             
-                            # --- BOTÃO DE RETRABALHO (MELHORIA) ---
+                            # --- BOTÃO DE RETRABALHO (MELHORIA SOLICITADA) ---
                             if item['Status_Atual'] != "⚠️ Em Retrabalho":
-                                with st.expander("Sinalizar Retrabalho"):
+                                with st.expander("🚨 Sinalizar Retrabalho"):
                                     motivo_ret = st.text_input("Motivo do Retrabalho", key=f"ret_{item['ID_Item']}")
-                                    if st.button("🚨 ENVIAR PARA RETRABALHO", key=f"btn_ret_{item['ID_Item']}"):
+                                    if st.button("CONFIRMAR RETRABALHO", key=f"btn_ret_{item['ID_Item']}"):
                                         if not motivo_ret: st.warning("Descreva o motivo.")
                                         else:
-                                            # Atualiza no Sheets
+                                            # Atualiza no Sheets e Supabase
                                             atualizar_status_lote([item['ID_Item']], "⚠️ Em Retrabalho", df_p)
                                             # Log de Auditoria
                                             df_alt = conn.read(worksheet="Alteracoes", ttl=0)
-                                            log_r = {"Data": datetime.now().strftime("%d/%m/%Y %H:%M"), "Pedido": item['Pedido'], "Usuario": st.session_state.user_display, "O que mudou": f"ENTRADA RETRABALHO: {motivo_ret}", "Impacto no Prazo": "Sim", "Impacto Financeiro": "Sim", "CTR": ctr_sel}
+                                            log_r = {
+                                                "Data": datetime.now().strftime("%d/%m/%Y %H:%M"), 
+                                                "Pedido": item['Pedido'], 
+                                                "Usuario": st.session_state.user_display, 
+                                                "Dono": item['Dono'],
+                                                "O que mudou": f"ENTRADA RETRABALHO: {motivo_ret}", 
+                                                "Impacto no Prazo": "Sim", 
+                                                "Impacto Financeiro": "Sim", 
+                                                "CTR": ctr_sel
+                                            }
                                             conn.update(worksheet="Alteracoes", data=pd.concat([df_alt, pd.DataFrame([log_r])], ignore_index=True))
                                             # Log de Histórico de Retrabalho para BI
                                             try:
@@ -432,7 +445,7 @@ if login():
                 dias = (row['Data_Entrega'].date() - date.today()).days if pd.notnull(row['Data_Entrega']) else None
                 status_html = ""
                 if dias is None: status_html = '<span style="color: grey;">⚪ SEM DATA</span>'
-                elif dias < 0: status_html = f'<div class="alerta-pulsante">❌ ATRASADO ({abs(dias)}d)</div>'
+                elif dias < 0: status_html = f'<div class="alerta-pulsante">❌ ATRASO ({abs(dias)}d)</div>'
                 elif dias <= 3: status_html = f'<div class="alerta-pulsante">🔴 URGENTE ({dias}d)</div>'
                 else: status_html = '<div class="no-prazo">🟢 NO PRAZO</div>'
                 c1, c2, c3, c4 = st.columns([2, 4, 2, 2])
@@ -441,6 +454,15 @@ if login():
                 with c3: st.write(f"📍 {row['Status_Atual']}\n📅 {row['Data_Entrega'].strftime('%d/%m/%Y') if pd.notnull(row['Data_Entrega']) else 'S/D'}")
                 with c4: st.markdown(status_html, unsafe_allow_html=True)
                 st.markdown("---")
+
+            if not df_concluidos_global.empty:
+                st.markdown("### 🏁 Itens Arquivados")
+                with st.expander("Clique para expandir o histórico de baixas"):
+                    df_c_filtro = df_concluidos_global.copy()
+                    if filtro_ctr: df_c_filtro = df_c_filtro[df_c_filtro['CTR'].isin(filtro_ctr)]
+                    if filtro_gestor: df_c_filtro = df_c_filtro[df_c_filtro['Dono'].isin(filtro_gestor)]
+                    st.dataframe(df_c_filtro[['CTR', 'Pedido', 'Data_Entrega', 'Data_Finalizacao', 'Performance']], use_container_width=True)
+
         except Exception as e: st.error(f"Erro no monitor: {e}")
 
     # --- ABA: RETRABALHO (MELHORIA SOLICITADA) ---
@@ -470,8 +492,8 @@ if login():
                                 # Registro na aba Checklist_Retrabalho
                                 try:
                                     df_chk = conn.read(worksheet="Checklist_Retrabalho", ttl=0)
-                                    novos_chks = [{"Data": datetime.now().strftime("%d/%m/%Y %H:%M"), "ID_Item": i, "Validado_Por": st.session_state.user_display, "Obs": obs_ret} for i in selecionados]
-                                    conn.update(worksheet="Checklist_Retrabalho", data=pd.concat([df_chk, pd.DataFrame(novos_chks)], ignore_index=True))
+                                    novas_chks = [{"Data": datetime.now().strftime("%d/%m/%Y %H:%M"), "ID_Item": i, "Validado_Por": st.session_state.user_display, "Obs": obs_ret} for i in selecionados]
+                                    conn.update(worksheet="Checklist_Retrabalho", data=pd.concat([df_chk, pd.DataFrame(novas_chks)], ignore_index=True))
                                 except: pass
                                 
                                 # Atualiza status final (Opção A: Rápida)
@@ -486,7 +508,7 @@ if login():
         itens = {"Materiais": ["Lista validada", "Quantidades conferidas", "Materiais especiais"], "Compras": ["Fornecedores definidos", "Lead times confirmados", "Datas registradas"], "Financeiro": ["Impacto caixa validado", "Compra autorizada", "Forma de pagamento"]}
         checklist_gate("GATE 2", "Checklist_G2", itens, "Financeiro", "Compras", "Falta material ➡️ PARADO", "Aguardando Produção (G3)", "Fábrica sem parada", "Na montagem", df_global)
 
-    elif menu == "🏭 Gate 3: Produção":
+    elif menu == "🏭 Gate 3: Production":
         itens = {"Planejamento": ["Sequenciado", "Capacidade validada", "Gargalo identificado", "Gargalo protegido"], "Projeto": ["Projeto técnico liberado", "Medidas conferidas", "Versão registrada"], "Comunicação": ["Produção ciente", "Prazo interno registrado", "Alterações registradas"]}
         checklist_gate("GATE 3", "Checklist_G3", itens, "PCP", "Produção", "Sem plano ➡️ BLOQUEADO", "Aguardando Entrega (G4)", "Produzir planejado", "No corte", df_global)
 
@@ -494,26 +516,33 @@ if login():
         itens = {"Produto": ["Produção concluída", "Qualidade conferida", "Separados por pedido"], "Logística": ["Checklist carga", "Frota definida", "Rota planejada"], "Prazo": ["Data validada", "Cliente informado", "Equipe montagem alinhada"]}
         checklist_gate("GATE 4", "Checklist_G4", itens, "Dono do Pedido (DP)", "Logística", "Erro acabamento ➡️ NÃO carrega", "CONCLUÍDO ✅", "Entrega perfeita", "Na carga", df_global)
 
-    # --- ABA: INDICADORES (MELHORIA BI) ---
+    # --- ABA: INDICADORES (MELHORIA SOLICITADA: FILTRO PERÍODO) ---
     elif menu == "📈 Indicadores de Performance":
         st.header("📈 Dashboard de Indicadores")
         try:
             df_p = df_global.copy()
             df_h = df_concluidos_global.copy()
             
-            todos_gestores = sorted(list(set(df_p['Dono'].unique()) | set(df_h['Dono'].unique() if not df_h.empty else [])))
-            gestor_sel = st.multiselect("🔍 Filtrar por Dono do Pedido", todos_gestores, key="filtro_bi_gestor")
+            # FILTROS DE TOPO (PERÍODO E GESTOR)
+            c_p1, c_p2, c_p3 = st.columns([2, 2, 4])
+            data_ini = c_p1.date_input("Início", value=date.today() - timedelta(days=30))
+            data_fim = c_p2.date_input("Fim", value=date.today())
             
-            if gestor_sel:
-                df_p = df_p[df_p['Dono'].isin(gestor_sel)]
-                if not df_h.empty: df_h = df_h[df_h['Dono'].isin(gestor_sel)]
-
-            # --- CARD DE RETRABALHO (MELHORIA) ---
+            todos_gestores = sorted(list(set(df_p['Dono'].unique()) | set(df_h['Dono'].unique() if not df_h.empty else [])))
+            gestor_sel = c_p3.multiselect("🔍 Filtrar por Dono do Pedido", todos_gestores, key="filtro_bi_gestor")
+            
+            # FILTRO DE PERÍODO NO HISTÓRICO DE RETRABALHO
             try:
                 df_hist_r = conn.read(worksheet="Historico_Retrabalho", ttl=10)
+                df_hist_r['dt_obj'] = pd.to_datetime(df_hist_r['Data'], dayfirst=True).dt.date
+                df_hist_r = df_hist_r[(df_hist_r['dt_obj'] >= data_ini) & (df_hist_r['dt_obj'] <= data_fim)]
                 if gestor_sel: df_hist_r = df_hist_r[df_hist_r['Dono'].isin(gestor_sel)]
                 total_ret = len(df_hist_r)
             except: total_ret = 0
+
+            if gestor_sel:
+                df_p = df_p[df_p['Dono'].isin(gestor_sel)]
+                if not df_h.empty: df_h = df_h[df_h['Dono'].isin(gestor_sel)]
 
             st.subheader("🚧 Fluxo de Itens por Portão")
             gates_count = df_p['Status_Atual'].value_counts()
@@ -522,7 +551,7 @@ if login():
             c_g2.metric("Gate 2", gates_count.get("Aguardando Materiais (G2)", 0))
             c_g3.metric("Gate 3", gates_count.get("Aguardando Produção (G3)", 0))
             c_g4.metric("Gate 4", gates_count.get("Aguardando Entrega (G4)", 0))
-            c_r.metric("⚠️ Retrabalhos (Total)", total_ret)
+            c_r.metric("⚠️ Retrabalhos (No Período)", total_ret)
 
             st.markdown("---")
             st.subheader("📊 Performance de Entregas (Arquivados)")
@@ -536,15 +565,40 @@ if login():
                 with c_graf2:
                     taxa = (perf_counts.get("NO PRAZO", 0) / len(df_h) * 100) if len(df_h) > 0 else 0
                     st.metric("Taxa de Eficiência", f"{taxa:.1f}%")
+                    st.write(f"Total: {len(df_h)} | ✅ No Prazo: {perf_counts.get('NO PRAZO', 0)} | ❌ Atraso: {perf_counts.get('ATRASADO', 0)}")
         except Exception as e: st.error(f"Erro nos indicadores: {e}")
 
+    # --- ABA: AUDITORIA (MELHORIA SOLICITADA: FILTROS AVANÇADOS) ---
     elif menu == "🚨 Auditoria":
-        st.header("🚨 Auditoria")
+        st.header("🚨 Auditoria de Alterações")
         try:
-            df_aud = conn.read(worksheet="Alteracoes", ttl="5m")
+            df_aud = conn.read(worksheet="Alteracoes", ttl="1m")
+            # TRATAMENTO DE DATA PARA FILTRO
             df_aud['temp_date'] = pd.to_datetime(df_aud['Data'], format="%d/%m/%Y %H:%M", errors='coerce')
-            df_aud = df_aud.sort_values(by='temp_date', ascending=False).drop(columns=['temp_date'])
-            st.table(df_aud)
+            df_aud = df_aud.sort_values(by='temp_date', ascending=False)
+            
+            # FILTROS AVANÇADOS
+            with st.expander("🔍 Filtros de Auditoria", expanded=True):
+                c1, c2, c3 = st.columns(3)
+                f_ini = c1.date_input("De", value=date.today() - timedelta(days=7))
+                f_fim = c2.date_input("Até", value=date.today())
+                f_ctr = c3.multiselect("Filtrar CTR", sorted(df_aud['CTR'].dropna().unique()))
+                
+                c4, c5, c6 = st.columns(3)
+                f_prazo = c4.multiselect("Impacto no Prazo", ["Sim", "Não"])
+                f_finan = c5.multiselect("Impacto Financeiro", ["Sim", "Não"])
+                f_dono = c6.multiselect("Dono (Gestor)", sorted(df_aud['Dono'].dropna().unique()))
+
+            # APLICAÇÃO DOS FILTROS
+            mask = (df_aud['temp_date'].dt.date >= f_ini) & (df_aud['temp_date'].dt.date <= f_fim)
+            if f_ctr: mask &= df_aud['CTR'].isin(f_ctr)
+            if f_prazo: mask &= df_aud['Impacto no Prazo'].isin(f_prazo)
+            if f_finan: mask &= df_aud['Impacto Financeiro'].isin(f_finan)
+            if f_dono: mask &= df_aud['Dono'].isin(f_dono)
+            
+            df_final_aud = df_aud[mask].drop(columns=['temp_date'])
+            st.dataframe(df_final_aud, use_container_width=True)
+            
         except Exception as e: st.error(f"Erro na auditoria: {e}")
 
     elif menu == "⚠️ Alteração de Pedido":
@@ -583,7 +637,21 @@ if login():
                                     conn.update(worksheet="Pedidos", data=df_save)
                                     st.cache_data.clear()
                                     df_alt = conn.read(worksheet="Alteracoes", ttl=0)
-                                    logs = [{"Data": datetime.now().strftime("%d/%m/%Y %H:%M"), "Pedido": df_save[df_save['ID_Item']==id]['Pedido'].iloc[0], "CTR": ctr_sel, "Usuario": st.session_state.user_display, "O que mudou": f"LOTE: Data {nova_data} / Gestor {novo_gestor}. Motivo: {motivo}", "Impacto no Prazo": imp_prazo, "Impacto Financeiro": imp_financeiro} for id in selecionados]
+                                    
+                                    # CAPTURA LOGS COM CAMPO DONO CORRETO
+                                    logs = []
+                                    for id_item in selecionados:
+                                        item_nome = df_save[df_save['ID_Item'] == id_item]['Pedido'].iloc[0]
+                                        logs.append({
+                                            "Data": datetime.now().strftime("%d/%m/%Y %H:%M"), 
+                                            "Pedido": item_nome, 
+                                            "CTR": ctr_sel, 
+                                            "Usuario": st.session_state.user_display, 
+                                            "Dono": novo_gestor,
+                                            "O que mudou": f"LOTE: Data {nova_data} / Gestor {novo_gestor}. Motivo: {motivo}", 
+                                            "Impacto no Prazo": imp_prazo, 
+                                            "Impacto Financeiro": imp_financeiro
+                                        })
                                     conn.update(worksheet="Alteracoes", data=pd.concat([df_alt, pd.DataFrame(logs)], ignore_index=True))
                                     for id_item in selecionados:
                                         row_alt = df_save[df_save['ID_Item'] == id_item].iloc[0]
