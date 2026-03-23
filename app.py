@@ -6,6 +6,7 @@ from datetime import datetime, date, timedelta
 import os
 import time
 import re
+import io
 
 # Configuração da Página
 st.set_page_config(page_title="Status - Gestão Integral por Item", layout="wide", page_icon="🏗️")
@@ -330,7 +331,6 @@ if login():
                                 novas_linhas = []
                                 logs_auditoria = []
                                 for id_item in selecionados:
-                                    # CAPTURA O DONO DO ITEM PARA A AUDITORIA
                                     dono_item = itens_pendentes[itens_pendentes['ID_Item'] == id_item]['Dono'].iloc[0]
                                     
                                     nova = {"Data": datetime.now().strftime("%d/%m/%Y %H:%M"), "ID_Item": id_item, "Validado_Por": st.session_state.user_display, "Obs": obs}
@@ -383,16 +383,13 @@ if login():
                             circulo = f'<span class="semaforo" style="background-color: {cor};"></span>'
                             st.markdown(f"{circulo} **{item['Pedido']}** | 📍 {item['Status_Atual']} | 📅 {i_dt.strftime('%d/%m') if pd.notnull(i_dt) else 'S/D'}", unsafe_allow_html=True)
                             
-                            # --- BOTÃO DE RETRABALHO (MELHORIA SOLICITADA) ---
                             if item['Status_Atual'] != "⚠️ Em Retrabalho":
                                 with st.expander("🚨 Sinalizar Retrabalho"):
                                     motivo_ret = st.text_input("Motivo do Retrabalho", key=f"ret_{item['ID_Item']}")
                                     if st.button("CONFIRMAR RETRABALHO", key=f"btn_ret_{item['ID_Item']}"):
                                         if not motivo_ret: st.warning("Descreva o motivo.")
                                         else:
-                                            # Atualiza no Sheets e Supabase
                                             atualizar_status_lote([item['ID_Item']], "⚠️ Em Retrabalho", df_p)
-                                            # Log de Auditoria
                                             df_alt = conn.read(worksheet="Alteracoes", ttl=0)
                                             log_r = {
                                                 "Data": datetime.now().strftime("%d/%m/%Y %H:%M"), 
@@ -405,7 +402,6 @@ if login():
                                                 "CTR": ctr_sel
                                             }
                                             conn.update(worksheet="Alteracoes", data=pd.concat([df_alt, pd.DataFrame([log_r])], ignore_index=True))
-                                            # Log de Histórico de Retrabalho para BI
                                             try:
                                                 df_hist_ret = conn.read(worksheet="Historico_Retrabalho", ttl=0)
                                                 log_h = {"Data": log_r['Data'], "ID_Item": item['ID_Item'], "Pedido": item['Pedido'], "Dono": item['Dono'], "CTR": ctr_sel, "Motivo_Entrada": motivo_ret}
@@ -465,7 +461,6 @@ if login():
 
         except Exception as e: st.error(f"Erro no monitor: {e}")
 
-    # --- ABA: RETRABALHO (MELHORIA SOLICITADA) ---
     elif menu == "🛠️ Portão de Retrabalho":
         st.header("🛠️ Gestão de Retrabalho")
         df_ret = df_global[df_global['Status_Atual'] == "⚠️ Em Retrabalho"]
@@ -489,14 +484,12 @@ if login():
                         if st.form_submit_button("CONCLUIR RETRABALHO 🛠️"):
                             if not all([c1, c2, c3]): st.error("Valide todo o checklist.")
                             else:
-                                # Registro na aba Checklist_Retrabalho
                                 try:
                                     df_chk = conn.read(worksheet="Checklist_Retrabalho", ttl=0)
                                     novas_chks = [{"Data": datetime.now().strftime("%d/%m/%Y %H:%M"), "ID_Item": i, "Validado_Por": st.session_state.user_display, "Obs": obs_ret} for i in selecionados]
                                     conn.update(worksheet="Checklist_Retrabalho", data=pd.concat([df_chk, pd.DataFrame(novas_chks)], ignore_index=True))
                                 except: pass
                                 
-                                # Atualiza status final (Opção A: Rápida)
                                 atualizar_status_lote(selecionados, proximo_gate, df_ret)
                                 st.success("Itens reintroduzidos no fluxo!"); time.sleep(1); st.rerun()
 
@@ -516,14 +509,12 @@ if login():
         itens = {"Produto": ["Produção concluída", "Qualidade conferida", "Separados por pedido"], "Logística": ["Checklist carga", "Frota definida", "Rota planejada"], "Prazo": ["Data validada", "Cliente informado", "Equipe montagem alinhada"]}
         checklist_gate("GATE 4", "Checklist_G4", itens, "Dono do Pedido (DP)", "Logística", "Erro acabamento ➡️ NÃO carrega", "CONCLUÍDO ✅", "Entrega perfeita", "Na carga", df_global)
 
-    # --- ABA: INDICADORES (MELHORIA SOLICITADA: FILTRO PERÍODO) ---
     elif menu == "📈 Indicadores de Performance":
         st.header("📈 Dashboard de Indicadores")
         try:
             df_p = df_global.copy()
             df_h = df_concluidos_global.copy()
             
-            # FILTROS DE TOPO (PERÍODO E GESTOR)
             c_p1, c_p2, c_p3 = st.columns([2, 2, 4])
             data_ini = c_p1.date_input("Início", value=date.today() - timedelta(days=30))
             data_fim = c_p2.date_input("Fim", value=date.today())
@@ -531,7 +522,6 @@ if login():
             todos_gestores = sorted(list(set(df_p['Dono'].unique()) | set(df_h['Dono'].unique() if not df_h.empty else [])))
             gestor_sel = c_p3.multiselect("🔍 Filtrar por Dono do Pedido", todos_gestores, key="filtro_bi_gestor")
             
-            # FILTRO DE PERÍODO NO HISTÓRICO DE RETRABALHO
             try:
                 df_hist_r = conn.read(worksheet="Historico_Retrabalho", ttl=10)
                 df_hist_r['dt_obj'] = pd.to_datetime(df_hist_r['Data'], dayfirst=True).dt.date
@@ -568,16 +558,13 @@ if login():
                     st.write(f"Total: {len(df_h)} | ✅ No Prazo: {perf_counts.get('NO PRAZO', 0)} | ❌ Atraso: {perf_counts.get('ATRASADO', 0)}")
         except Exception as e: st.error(f"Erro nos indicadores: {e}")
 
-    # --- ABA: AUDITORIA (MELHORIA SOLICITADA: FILTROS AVANÇADOS) ---
     elif menu == "🚨 Auditoria":
         st.header("🚨 Auditoria de Alterações")
         try:
             df_aud = conn.read(worksheet="Alteracoes", ttl="1m")
-            # TRATAMENTO DE DATA PARA FILTRO
             df_aud['temp_date'] = pd.to_datetime(df_aud['Data'], format="%d/%m/%Y %H:%M", errors='coerce')
             df_aud = df_aud.sort_values(by='temp_date', ascending=False)
             
-            # FILTROS AVANÇADOS
             with st.expander("🔍 Filtros de Auditoria", expanded=True):
                 c1, c2, c3 = st.columns(3)
                 f_ini = c1.date_input("De", value=date.today() - timedelta(days=7))
@@ -589,7 +576,6 @@ if login():
                 f_finan = c5.multiselect("Impacto Financeiro", ["Sim", "Não"])
                 f_dono = c6.multiselect("Dono (Gestor)", sorted(df_aud['Dono'].dropna().unique()))
 
-            # APLICAÇÃO DOS FILTROS
             mask = (df_aud['temp_date'].dt.date >= f_ini) & (df_aud['temp_date'].dt.date <= f_fim)
             if f_ctr: mask &= df_aud['CTR'].isin(f_ctr)
             if f_prazo: mask &= df_aud['Impacto no Prazo'].isin(f_prazo)
@@ -598,6 +584,20 @@ if login():
             
             df_final_aud = df_aud[mask].drop(columns=['temp_date'])
             st.dataframe(df_final_aud, use_container_width=True)
+            
+            # --- BOTÃO DE EXPORTAÇÃO PARA EXCEL ---
+            if not df_final_aud.empty:
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                    df_final_aud.to_excel(writer, index=False, sheet_name='Auditoria')
+                processed_data = output.getvalue()
+                
+                st.download_button(
+                    label="📥 Baixar Auditoria em Excel",
+                    data=processed_data,
+                    file_name=f'auditoria_marcenaria_{datetime.now().strftime("%Y%m%d_%H%M")}.xlsx',
+                    mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                )
             
         except Exception as e: st.error(f"Erro na auditoria: {e}")
 
@@ -638,7 +638,6 @@ if login():
                                     st.cache_data.clear()
                                     df_alt = conn.read(worksheet="Alteracoes", ttl=0)
                                     
-                                    # CAPTURA LOGS COM CAMPO DONO CORRETO
                                     logs = []
                                     for id_item in selecionados:
                                         item_nome = df_save[df_save['ID_Item'] == id_item]['Pedido'].iloc[0]
