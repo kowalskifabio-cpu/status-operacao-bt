@@ -13,9 +13,12 @@ st.set_page_config(page_title="Status - Gestão Integral por Item", layout="wide
 # --- 1. CONEXÕES (HÍBRIDA: SHEETS + SUPABASE) ---
 @st.cache_resource
 def init_supabase():
-    url = st.secrets["supabase"]["url"]
-    key = st.secrets["supabase"]["key"]
-    return create_client(url, key)
+    try:
+        url = st.secrets["supabase"]["url"]
+        key = st.secrets["supabase"]["key"]
+        return create_client(url, key)
+    except:
+        return None
 
 supabase = init_supabase()
 conn = st.connection("gsheets", type=GSheetsConnection)
@@ -204,6 +207,7 @@ if login():
         "📊 Resumo e Prazos (Itens)", 
         "📈 Indicadores de Performance", 
         "🚨 Auditoria", 
+        "🛠️ Portão de Retrabalho", # NOVO
         "✅ Gate 1: Aceite Técnico", 
         "💰 Gate 2: Material", 
         "🏭 Gate 3: Produção", 
@@ -216,7 +220,7 @@ if login():
     ]
 
     if papel_usuario == "Dono do Pedido (DP)":
-        for item in ["🚨 Auditoria", "📈 Indicadores de Performance", "🛠️ Recuperação de Pedidos", "⚙️ SINCRONIZAÇÃO SUPABASE", "🏁 Concluir Pedidos (Baixa)"]:
+        for item in ["🚨 Auditoria", "📈 Indicadores de Performance", "🛠️ Portão de Retrabalho", "🛠️ Recuperação de Pedidos", "⚙️ SINCRONIZAÇÃO SUPABASE", "🏁 Concluir Pedidos (Baixa)"]:
             if item in opcoes_menu: opcoes_menu.remove(item)
         
     menu = st.sidebar.radio("Navegação", opcoes_menu)
@@ -374,6 +378,28 @@ if login():
                             cor = "#28a745" if i_dias is not None and i_dias > 3 else "#FF0000" if i_dias is not None else "grey"
                             circulo = f'<span class="semaforo" style="background-color: {cor};"></span>'
                             st.markdown(f"{circulo} **{item['Pedido']}** | 📍 {item['Status_Atual']} | 📅 {i_dt.strftime('%d/%m') if pd.notnull(i_dt) else 'S/D'}", unsafe_allow_html=True)
+                            
+                            # --- BOTÃO DE RETRABALHO (MELHORIA) ---
+                            if item['Status_Atual'] != "⚠️ Em Retrabalho":
+                                with st.expander("Sinalizar Retrabalho"):
+                                    motivo_ret = st.text_input("Motivo do Retrabalho", key=f"ret_{item['ID_Item']}")
+                                    if st.button("🚨 ENVIAR PARA RETRABALHO", key=f"btn_ret_{item['ID_Item']}"):
+                                        if not motivo_ret: st.warning("Descreva o motivo.")
+                                        else:
+                                            # Atualiza no Sheets
+                                            atualizar_status_lote([item['ID_Item']], "⚠️ Em Retrabalho", df_p)
+                                            # Log de Auditoria
+                                            df_alt = conn.read(worksheet="Alteracoes", ttl=0)
+                                            log_r = {"Data": datetime.now().strftime("%d/%m/%Y %H:%M"), "Pedido": item['Pedido'], "Usuario": st.session_state.user_display, "O que mudou": f"ENTRADA RETRABALHO: {motivo_ret}", "Impacto no Prazo": "Sim", "Impacto Financeiro": "Sim", "CTR": ctr_sel}
+                                            conn.update(worksheet="Alteracoes", data=pd.concat([df_alt, pd.DataFrame([log_r])], ignore_index=True))
+                                            # Log de Histórico de Retrabalho para BI
+                                            try:
+                                                df_hist_ret = conn.read(worksheet="Historico_Retrabalho", ttl=0)
+                                                log_h = {"Data": log_r['Data'], "ID_Item": item['ID_Item'], "Pedido": item['Pedido'], "Dono": item['Dono'], "CTR": ctr_sel, "Motivo_Entrada": motivo_ret}
+                                                conn.update(worksheet="Historico_Retrabalho", data=pd.concat([df_hist_ret, pd.DataFrame([log_h])], ignore_index=True))
+                                            except: pass
+                                            st.success("Item movido para retrabalho!"); time.sleep(1); st.rerun()
+
                     if dias is None: status_html = '<span style="color: grey;">⚪ SEM DATA</span>'
                     elif dias < 0: status_html = f'<div class="alerta-pulsante">❌ ATRASO CRÍTICO</div>'
                     elif dias <= 3: status_html = f'<div class="alerta-pulsante">🔴 URGENTE</div>'
@@ -415,16 +441,42 @@ if login():
                 with c3: st.write(f"📍 {row['Status_Atual']}\n📅 {row['Data_Entrega'].strftime('%d/%m/%Y') if pd.notnull(row['Data_Entrega']) else 'S/D'}")
                 with c4: st.markdown(status_html, unsafe_allow_html=True)
                 st.markdown("---")
-
-            if not df_concluidos_global.empty:
-                st.markdown("### 🏁 Itens Arquivados")
-                with st.expander("Clique para expandir o histórico de baixas"):
-                    df_c_filtro = df_concluidos_global.copy()
-                    if filtro_ctr: df_c_filtro = df_c_filtro[df_c_filtro['CTR'].isin(filtro_ctr)]
-                    if filtro_gestor: df_c_filtro = df_c_filtro[df_c_filtro['Dono'].isin(filtro_gestor)]
-                    st.dataframe(df_c_filtro[['CTR', 'Pedido', 'Data_Entrega', 'Data_Finalizacao', 'Performance']], use_container_width=True)
-
         except Exception as e: st.error(f"Erro no monitor: {e}")
+
+    # --- ABA: RETRABALHO (MELHORIA SOLICITADA) ---
+    elif menu == "🛠️ Portão de Retrabalho":
+        st.header("🛠️ Gestão de Retrabalho")
+        df_ret = df_global[df_global['Status_Atual'] == "⚠️ Em Retrabalho"]
+        if df_ret.empty:
+            st.success("Nenhum item em retrabalho no momento.")
+        else:
+            ctrs_ret = [""] + sorted(df_ret['CTR'].unique().tolist())
+            ctr_sel = st.selectbox("Selecione a CTR com retrabalho:", ctrs_ret)
+            if ctr_sel:
+                itens_pend = df_ret[df_ret['CTR'] == ctr_sel]
+                selecionados = st.multiselect("Itens para validar:", options=itens_pend['ID_Item'].tolist(), format_func=lambda x: f"{itens_pend[itens_pend['ID_Item'] == x]['Pedido'].iloc[0]}")
+                if selecionados:
+                    with st.form("form_retrabalho"):
+                        st.markdown("#### ✅ Checklist de Qualidade")
+                        c1 = st.checkbox("Peça Danificada Identificada")
+                        c2 = st.checkbox("Material Solicitado")
+                        c3 = st.checkbox("Prioridade Produção Confirmada")
+                        obs_ret = st.text_area("Observações do Reparo")
+                        proximo_gate = st.selectbox("Retornar para qual portão?", ["Aguardando Produção (G3)", "Aguardando Entrega (G4)"])
+                        
+                        if st.form_submit_button("CONCLUIR RETRABALHO 🛠️"):
+                            if not all([c1, c2, c3]): st.error("Valide todo o checklist.")
+                            else:
+                                # Registro na aba Checklist_Retrabalho
+                                try:
+                                    df_chk = conn.read(worksheet="Checklist_Retrabalho", ttl=0)
+                                    novos_chks = [{"Data": datetime.now().strftime("%d/%m/%Y %H:%M"), "ID_Item": i, "Validado_Por": st.session_state.user_display, "Obs": obs_ret} for i in selecionados]
+                                    conn.update(worksheet="Checklist_Retrabalho", data=pd.concat([df_chk, pd.DataFrame(novos_chks)], ignore_index=True))
+                                except: pass
+                                
+                                # Atualiza status final (Opção A: Rápida)
+                                atualizar_status_lote(selecionados, proximo_gate, df_ret)
+                                st.success("Itens reintroduzidos no fluxo!"); time.sleep(1); st.rerun()
 
     elif menu == "✅ Gate 1: Aceite Técnico":
         itens = {"Informações Comerciais": ["Pedido registrado", "Cliente identificado", "Tipo de obra definido", "Responsável identificado"], "Escopo Técnico": ["Projeto mínimo recebido", "Ambientes definidos", "Materiais principais", "Itens fora do padrão"], "Prazo (prévia)": ["Prazo solicitado registrado", "Prazo avaliado", "Risco de prazo"], "Governança": ["Dono do Pedido definido", "PCP validou viabilidade", "Aprovado formalmente"]}
@@ -442,14 +494,13 @@ if login():
         itens = {"Produto": ["Produção concluída", "Qualidade conferida", "Separados por pedido"], "Logística": ["Checklist carga", "Frota definida", "Rota planejada"], "Prazo": ["Data validada", "Cliente informado", "Equipe montagem alinhada"]}
         checklist_gate("GATE 4", "Checklist_G4", itens, "Dono do Pedido (DP)", "Logística", "Erro acabamento ➡️ NÃO carrega", "CONCLUÍDO ✅", "Entrega perfeita", "Na carga", df_global)
 
-    # --- ABA: INDICADORES (COM FILTRO GESTOR E PERFORMANCE) ---
+    # --- ABA: INDICADORES (MELHORIA BI) ---
     elif menu == "📈 Indicadores de Performance":
         st.header("📈 Dashboard de Indicadores")
         try:
             df_p = df_global.copy()
             df_h = df_concluidos_global.copy()
             
-            # FILTRO POR GESTOR (BI)
             todos_gestores = sorted(list(set(df_p['Dono'].unique()) | set(df_h['Dono'].unique() if not df_h.empty else [])))
             gestor_sel = st.multiselect("🔍 Filtrar por Dono do Pedido", todos_gestores, key="filtro_bi_gestor")
             
@@ -457,14 +508,21 @@ if login():
                 df_p = df_p[df_p['Dono'].isin(gestor_sel)]
                 if not df_h.empty: df_h = df_h[df_h['Dono'].isin(gestor_sel)]
 
+            # --- CARD DE RETRABALHO (MELHORIA) ---
+            try:
+                df_hist_r = conn.read(worksheet="Historico_Retrabalho", ttl=10)
+                if gestor_sel: df_hist_r = df_hist_r[df_hist_r['Dono'].isin(gestor_sel)]
+                total_ret = len(df_hist_r)
+            except: total_ret = 0
+
             st.subheader("🚧 Fluxo de Itens por Portão")
             gates_count = df_p['Status_Atual'].value_counts()
-            c_g1, c_g2, c_g3, c_g4, c_g5 = st.columns(5)
+            c_g1, c_g2, c_g3, c_g4, c_r = st.columns(5)
             c_g1.metric("Gate 1", gates_count.get("Aguardando Gate 1", 0))
             c_g2.metric("Gate 2", gates_count.get("Aguardando Materiais (G2)", 0))
             c_g3.metric("Gate 3", gates_count.get("Aguardando Produção (G3)", 0))
             c_g4.metric("Gate 4", gates_count.get("Aguardando Entrega (G4)", 0))
-            c_g5.metric("Concluídos", gates_count.get("CONCLUÍDO ✅", 0))
+            c_r.metric("⚠️ Retrabalhos (Total)", total_ret)
 
             st.markdown("---")
             st.subheader("📊 Performance de Entregas (Arquivados)")
@@ -478,7 +536,6 @@ if login():
                 with c_graf2:
                     taxa = (perf_counts.get("NO PRAZO", 0) / len(df_h) * 100) if len(df_h) > 0 else 0
                     st.metric("Taxa de Eficiência", f"{taxa:.1f}%")
-                    st.write(f"Total: {len(df_h)} | ✅ No Prazo: {perf_counts.get('NO PRAZO', 0)} | ❌ Atraso: {perf_counts.get('ATRASADO', 0)}")
         except Exception as e: st.error(f"Erro nos indicadores: {e}")
 
     elif menu == "🚨 Auditoria":
