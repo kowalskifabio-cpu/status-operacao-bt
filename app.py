@@ -463,12 +463,73 @@ if login():
 
     elif menu == "🛠️ Portão de Retrabalho":
         st.header("🛠️ Gestão de Retrabalho")
+        
+        # --- NOVO: RESGATE DE ITENS CONCLUÍDOS ---
+        with st.expander("⏪ Resgatar Item do Histórico (Concluídos)"):
+            if df_concluidos_global.empty:
+                st.info("Não há histórico de itens concluídos.")
+            else:
+                ctr_hist = st.selectbox("CTR do Item Concluído:", [""] + sorted(df_concluidos_global['CTR'].unique().tolist()))
+                if ctr_hist:
+                    itens_hist = df_concluidos_global[df_concluidos_global['CTR'] == ctr_hist]
+                    item_resgate = st.selectbox("Selecione o Item para retornar ao Retrabalho:", 
+                                               options=itens_hist['ID_Item'].tolist(),
+                                               format_func=lambda x: f"{itens_hist[itens_hist['ID_Item'] == x]['Pedido'].iloc[0]}")
+                    
+                    motivo_resgate = st.text_input("Motivo da Reabertura (Retrabalho):", key="motivo_resgate")
+                    
+                    if st.button("🚨 RESGATAR E ENVIAR PARA RETRABALHO"):
+                        if not motivo_resgate:
+                            st.warning("Informe o motivo.")
+                        else:
+                            # 1. Carregar bases atuais
+                            df_pedidos_atual = conn.read(worksheet="Pedidos", ttl=0)
+                            df_hist_atual = conn.read(worksheet="Pedidos_Concluidos", ttl=0)
+                            
+                            # 2. Mover item
+                            row_resgate = df_hist_atual[df_hist_atual['ID_Item'] == item_resgate].copy()
+                            row_resgate['Status_Atual'] = "⚠️ Em Retrabalho"
+                            
+                            # Limpar colunas de conclusão para o item voltar limpo
+                            for col in ["Data_Finalizacao", "Performance"]:
+                                if col in row_resgate.columns: row_resgate[col] = None
+                                
+                            # 3. Atualizar Planilhas
+                            df_novo_pedidos = pd.concat([df_pedidos_atual, row_resgate], ignore_index=True)
+                            df_novo_hist = df_hist_atual[df_hist_atual['ID_Item'] != item_resgate]
+                            
+                            conn.update(worksheet="Pedidos", data=df_novo_pedidos)
+                            conn.update(worksheet="Pedidos_Concluidos", data=df_novo_hist)
+                            
+                            # 4. Logs
+                            log_res = {
+                                "Data": datetime.now().strftime("%d/%m/%Y %H:%M"), 
+                                "Pedido": row_resgate['Pedido'].iloc[0], 
+                                "Usuario": st.session_state.user_display, 
+                                "Dono": row_resgate['Dono'].iloc[0],
+                                "O que mudou": f"REABERTURA PÓS-CONCLUÍDO: {motivo_resgate}", 
+                                "Impacto no Prazo": "Sim", "Impacto Financeiro": "Sim", "CTR": ctr_hist
+                            }
+                            df_alt = conn.read(worksheet="Alteracoes", ttl=0)
+                            conn.update(worksheet="Alteracoes", data=pd.concat([df_alt, pd.DataFrame([log_res])], ignore_index=True))
+                            
+                            # 5. Supabase
+                            salvar_no_supabase(item_resgate, "⚠️ Em Retrabalho", row_resgate.iloc[0])
+                            
+                            st.success("Item resgatado com sucesso!")
+                            st.cache_data.clear()
+                            time.sleep(1)
+                            st.rerun()
+
+        st.divider()
+        
+        # --- GESTÃO DE QUEM JÁ ESTÁ EM RETRABALHO ---
         df_ret = df_global[df_global['Status_Atual'] == "⚠️ Em Retrabalho"]
         if df_ret.empty:
             st.success("Nenhum item em retrabalho no momento.")
         else:
             ctrs_ret = [""] + sorted(df_ret['CTR'].unique().tolist())
-            ctr_sel = st.selectbox("Selecione a CTR com retrabalho:", ctrs_ret)
+            ctr_sel = st.selectbox("Selecione a CTR com retrabalho em andamento:", ctrs_ret)
             if ctr_sel:
                 itens_pend = df_ret[df_ret['CTR'] == ctr_sel]
                 selecionados = st.multiselect("Itens para validar:", options=itens_pend['ID_Item'].tolist(), format_func=lambda x: f"{itens_pend[itens_pend['ID_Item'] == x]['Pedido'].iloc[0]}")
@@ -585,7 +646,6 @@ if login():
             df_final_aud = df_aud[mask].drop(columns=['temp_date'])
             st.dataframe(df_final_aud, use_container_width=True)
             
-            # --- BOTÃO DE EXPORTAÇÃO PARA EXCEL ---
             if not df_final_aud.empty:
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
