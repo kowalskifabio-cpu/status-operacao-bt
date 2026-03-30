@@ -295,7 +295,6 @@ if login():
                             conn.update(worksheet="Pedidos_Concluidos", data=df_final_hist)
                             conn.update(worksheet="Pedidos", data=df_final_pedidos)
                             
-                            # SINCRONIA SUPABASE: Arquiva o item no banco também
                             for id_item in selecionados:
                                 try:
                                     supabase.table("pedidos").update({"status_atual": "ARQUIVADO"}).eq("id_item", id_item).execute()
@@ -791,10 +790,34 @@ if login():
 
     elif menu == "⚙️ SINCRONIZAÇÃO SUPABASE":
         st.header("⚙️ Sincronização em Massa")
-        if st.button("🚀 FORÇAR SINCRONIZAÇÃO GERAL"):
-            for idx, row in df_global.iterrows():
-                salvar_no_supabase(row['ID_Item'], row['Status_Atual'], row)
-            st.success("Base do Supabase atualizada com sucesso!")
+        col_sinc1, col_sinc2 = st.columns(2)
+        
+        with col_sinc1:
+            st.subheader("Pedidos Ativos")
+            if st.button("🚀 FORÇAR SINCRONIZAÇÃO GERAL"):
+                with st.spinner("Sincronizando ativos..."):
+                    for idx, row in df_global.iterrows():
+                        salvar_no_supabase(row['ID_Item'], row['Status_Atual'], row)
+                st.success("Base do Supabase (Ativos) atualizada!")
+
+        with col_sinc2:
+            st.subheader("Histórico de Concluídos")
+            if st.button("🏁 SINCRONIZAR HISTÓRICO (765 ITENS)"):
+                with st.spinner("Isso pode levar alguns minutos..."):
+                    df_hist_full = conn.read(worksheet="Pedidos_Concluidos", ttl=0)
+                    progress_bar = st.progress(0)
+                    total = len(df_hist_full)
+                    for i, row in df_hist_full.iterrows():
+                        payload = {
+                            "id_item": str(row['ID_Item']), "status_atual": "ARQUIVADO",
+                            "ctr": str(row.get('CTR', '')), "obra": str(row.get('Obra', '')),
+                            "item_projeto": str(row.get('Item', '')), "pedido": str(row.get('Pedido', '')),
+                            "dono": str(row.get('Dono', '')),
+                            "data_entrega": str(row['Data_Entrega']) if pd.notnull(row.get('Data_Entrega')) else None
+                        }
+                        supabase.table("pedidos").upsert(payload).execute()
+                        progress_bar.progress((i + 1) / total)
+                    st.success(f"✅ {total} itens do histórico migrados para o Supabase!")
 
     elif menu == "🛠️ Recuperação de Pedidos":
         st.header("🛠️ Recuperação e Limpeza de Dados")
