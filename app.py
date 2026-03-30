@@ -182,7 +182,7 @@ if login():
     def log_auditoria_supabase(log_dict):
         """Registra alteração na tabela de auditoria do Supabase"""
         try:
-            # Note o uso exato das aspas para casar com o SQL Maiúsculo
+            # Note o uso das chaves com letras Maiúsculas para casar com o SQL blindado
             payload = {
                 "Data": str(log_dict.get('Data', '')),
                 "Pedido": str(log_dict.get('Pedido', '')),
@@ -809,9 +809,10 @@ if login():
                     df_hist_full = conn.read(worksheet="Pedidos_Concluidos", ttl=0)
                     prog = st.progress(0)
                     for i, row in df_hist_full.iterrows():
+                        # Usamos a mesma tabela 'pedidos' com status 'ARQUIVADO'
                         salvar_no_supabase(row['ID_Item'], "ARQUIVADO", row)
                         prog.progress((i + 1) / len(df_hist_full))
-                st.success("Histórico sincronizado!")
+                st.success("Histórico sincronizado na tabela 'pedidos'!")
 
         with c3:
             st.subheader("3. Alterações (2.500+)")
@@ -821,12 +822,16 @@ if login():
                     prog_a = st.progress(0)
                     lote = []
                     for i, row in df_aud_full.iterrows():
+                        # O segredo aqui é usar as aspas duplas no payload para casar com o SQL Maiúsculo
                         lote.append({
-                            "Data": str(row['Data']), "Pedido": str(row['Pedido']),
-                            "Usuario": str(row['Usuario']), "O que mudou": str(row['O que mudou']),
+                            "Data": str(row['Data']), 
+                            "Pedido": str(row['Pedido']),
+                            "Usuario": str(row['Usuario']), 
+                            "O que mudou": str(row['O que mudou']),
                             "Impacto no Prazo": str(row['Impacto no Prazo']),
                             "Impacto Financeiro": str(row['Impacto Financeiro']),
-                            "CTR": str(row['CTR']), "Dono": str(row.get('Dono', ''))
+                            "CTR": str(row['CTR']), 
+                            "Dono": str(row.get('Dono', ''))
                         })
                         if len(lote) >= 50:
                             supabase.table("alteracoes").insert(lote).execute()
