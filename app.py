@@ -233,8 +233,8 @@ if login():
         "📈 Indicadores de Performance", 
         "🚨 Auditoria", 
         "🛠️ Portão de Retrabalho",
-        "✅ Gate 1: Aceite Técnico", 
-        "💰 Gate 2: Material", 
+        "💰 Gate 1: Material", # Invertido
+        "✅ Gate 2: Aceite Técnico", # Invertido
         "🏭 Gate 3: Production", 
         "🚛 Gate 4: Entrega", 
         "⚠️ Alteração de Pedido",
@@ -314,8 +314,9 @@ if login():
         st.info(f"⚖️ **R:** {responsavel_r} | 🔨 **E:** {executor_e}")
         
         try:
-            status_requerido = "Aguardando Gate 1" if gate_id == "GATE 1" else \
-                               "Aguardando Materiais (G2)" if gate_id == "GATE 2" else \
+            # Lógica de status requerida ajustada para a inversão solicitada
+            status_requerido = "Aguardando Materiais (G1)" if gate_id == "GATE 1 (MAT)" else \
+                               "Aguardando Aceite Técnico (G2)" if gate_id == "GATE 2 (TEC)" else \
                                "Aguardando Produção (G3)" if gate_id == "GATE 3" else \
                                "Aguardando Entrega (G4)"
 
@@ -365,7 +366,7 @@ if login():
                                         "Data": datetime.now().strftime("%d/%m/%Y %H:%M"),
                                         "Pedido": item_nome, "Usuario": st.session_state.user_display,
                                         "Dono": dono_item,
-                                        "O que mudou": f"GATE: Avanço para {proximo_status}. Obs: {obs}",
+                                        "O que mudou": f"AVANÇO: {gate_id} para {proximo_status}. Obs: {obs}",
                                         "Impacto no Prazo": "Não", "Impacto Financeiro": "Não", "CTR": ctr_sel
                                     }
                                     logs_auditoria.append(log_entry)
@@ -599,13 +600,19 @@ if login():
                                 atualizar_status_lote(selecionados, proximo_gate, df_ret)
                                 st.success("Itens reintroduzidos no fluxo!"); time.sleep(1); st.rerun()
 
-    elif menu == "✅ Gate 1: Aceite Técnico":
-        itens = {"Informações Comerciais": ["Pedido registrado", "Cliente identificado", "Tipo de obra definido", "Responsável identificado"], "Escopo Técnico": ["Projeto mínimo recebido", "Ambientes definidos", "Materiais principais", "Itens fora do padrão"], "Prazo (prévia)": ["Prazo solicitado registrado", "Prazo avaliado", "Risco de prazo"], "Governança": ["Dono do Pedido definido", "PCP validou viabilidade", "Aprovado formalmente"]}
-        checklist_gate("GATE 1", "Checklist_G1", itens, "Dono do Pedido (DP)", "PCP", "Projeto incompleto ➡️ BLOQUEADO", "Aguardando Materiais (G2)", "Impedir entrada mal definida", "Antes do plano", df_global)
-
-    elif menu == "💰 Gate 2: Material":
+    # --- NOVO GATE 1: MATERIAL (APONTA PARA CHECKLIST_G2) ---
+    elif menu == "💰 Gate 1: Material":
         itens = {"Materiais": ["Lista validada", "Quantidades conferidas", "Materiais especiais"], "Compras": ["Fornecedores definidos", "Lead times confirmados", "Datas registradas"], "Financeiro": ["Impacto caixa validado", "Compra autorizada", "Forma de pagamento"]}
-        checklist_gate("GATE 2", "Checklist_G2", itens, "Financeiro", "Compras", "Falta material ➡️ PARADO", "Aguardando Produção (G3)", "Fábrica sem parada", "Na montagem", df_global)
+        # proximo_status: Aguardando Aceite Técnico (G2)
+        # aba: Checklist_G2 (mantendo sua fonte de dados de materiais)
+        checklist_gate("GATE 1 (MAT)", "Checklist_G2", itens, "Financeiro", "Compras", "Falta material ➡️ PARADO", "Aguardando Aceite Técnico (G2)", "Fábrica sem parada", "Na montagem", df_global)
+
+    # --- NOVO GATE 2: ACEITE TÉCNICO (APONTA PARA CHECKLIST_G1) ---
+    elif menu == "✅ Gate 2: Aceite Técnico":
+        itens = {"Informações Comerciais": ["Pedido registrado", "Cliente identificado", "Tipo de obra definido", "Responsável identificado"], "Escopo Técnico": ["Projeto mínimo recebido", "Ambientes definidos", "Materiais principais", "Itens fora do padrão"], "Prazo (prévia)": ["Prazo solicitado registrado", "Prazo avaliado", "Risco de prazo"], "Governança": ["Dono do Pedido definido", "PCP validou viabilidade", "Aprovado formalmente"]}
+        # proximo_status: Aguardando Produção (G3)
+        # aba: Checklist_G1 (mantendo sua fonte de dados de aceite técnico)
+        checklist_gate("GATE 2 (TEC)", "Checklist_G1", itens, "Dono do Pedido (DP)", "PCP", "Projeto incompleto ➡️ BLOQUEADO", "Aguardando Produção (G3)", "Impedir entrada mal definida", "Antes do plano", df_global)
 
     elif menu == "🏭 Gate 3: Production":
         itens = {"Planejamento": ["Sequenciado", "Capacidade validada", "Gargalo identificado", "Gargalo protegido"], "Projeto": ["Projeto técnico liberado", "Medidas conferidas", "Versão registrada"], "Comunicação": ["Produção ciente", "Prazo interno registrado", "Alterações registradas"]}
@@ -641,10 +648,11 @@ if login():
             st.subheader("🚧 Fluxo de Itens por Portão")
             gates_count = df_p['Status_Atual'].value_counts()
             c_g1, c_g2, c_g3, c_g4, c_r = st.columns(5)
-            c_g1.metric("Gate 1", gates_count.get("Aguardando Gate 1", 0))
-            c_g2.metric("Gate 2", gates_count.get("Aguardando Materiais (G2)", 0))
-            c_g3.metric("Gate 3", gates_count.get("Aguardando Produção (G3)", 0))
-            c_g4.metric("Gate 4", gates_count.get("Aguardando Entrega (G4)", 0))
+            # Atualização dos textos nos indicadores
+            c_g1.metric("Materiais (G1)", gates_count.get("Aguardando Materiais (G1)", 0))
+            c_g2.metric("Aceite Técnico (G2)", gates_count.get("Aguardando Aceite Técnico (G2)", 0))
+            c_g3.metric("Produção (G3)", gates_count.get("Aguardando Produção (G3)", 0))
+            c_g4.metric("Entrega (G4)", gates_count.get("Aguardando Entrega (G4)", 0))
             c_r.metric("⚠️ Retrabalhos (No Período)", total_ret)
 
             st.markdown("---")
@@ -777,14 +785,15 @@ if login():
                             dt_crua = pd.to_datetime(r['Data Entrega'], errors='coerce')
                             dt_limpa = dt_crua.strftime('%Y-%m-%d') if pd.notnull(dt_crua) else ""
                             if str(uid) not in df_base['ID_Item'].astype(str).values:
-                                payload_novo = {"ID_Item": uid, "CTR": r['Centro de custo'], "Obra": r['Obra'], "Item": r['Item'], "Pedido": r['Produto'], "Dono": r['Gestor'], "Status_Atual": "Aguardando Gate 1", "Data_Entrega": dt_limpa, "Quantidade": r['Quantidade'], "Unidade": r['Unidade']}
+                                # AGORA NASCE COM STATUS DE MATERIAIS (NOVO PASSO 1)
+                                payload_novo = {"ID_Item": uid, "CTR": r['Centro de custo'], "Obra": r['Obra'], "Item": r['Item'], "Pedido": r['Produto'], "Dono": r['Gestor'], "Status_Atual": "Aguardando Materiais (G1)", "Data_Entrega": dt_limpa, "Quantidade": r['Quantidade'], "Unidade": r['Unidade']}
                                 novos.append(payload_novo)
                         if novos: 
                             final_df = pd.concat([df_base, pd.DataFrame(novos)], ignore_index=True)
                             final_df = final_df.drop_duplicates(subset=['ID_Item'], keep='first')
                             conn.update(worksheet="Pedidos", data=final_df)
                             for n in novos:
-                                salvar_no_supabase(n['ID_Item'], "Aguardando Gate 1", n)
+                                salvar_no_supabase(n['ID_Item'], "Aguardando Materiais (G1)", n)
                             st.success(f"✅ {len(novos)} novos itens importados!")
                         else: st.warning("⚠️ Nenhum item novo encontrado.")
                         st.cache_data.clear()
