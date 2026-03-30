@@ -159,7 +159,9 @@ if login():
     df_global = load_pedidos()
     df_concluidos_global = load_historico()
 
+    # --- FUNÇÕES DE SINCRONIZAÇÃO SUPABASE (PARALELO) ---
     def salvar_no_supabase(id_item, novo_status, row_dados=None):
+        """Atualiza a tabela principal de pedidos no Supabase"""
         try:
             payload = {"id_item": str(id_item), "status_atual": str(novo_status)}
             if row_dados is not None:
@@ -174,13 +176,33 @@ if login():
                     "unidade": str(row_dados.get('Unidade', 'un'))
                 })
             supabase.table("pedidos").upsert(payload).execute()
-        except Exception as e: pass
+        except Exception as e: 
+            st.warning(f"Erro sincronia Supabase (Pedidos): {e}")
+
+    def log_auditoria_supabase(log_dict):
+        """Registra alteração na tabela de auditoria do Supabase"""
+        try:
+            payload = {
+                "pedido": log_dict.get('Pedido'),
+                "usuario": log_dict.get('Usuario'),
+                "dono": log_dict.get('Dono'),
+                "o_que_mudou": log_dict.get('O que mudou'),
+                "impacto_prazo": log_dict.get('Impacto no Prazo'),
+                "impacto_financeiro": log_dict.get('Impacto Financeiro'),
+                "ctr": log_dict.get('CTR')
+            }
+            supabase.table("alteracoes").insert(payload).execute()
+        except Exception as e:
+            pass
 
     def atualizar_status_lote(lista_ids, novo_status, df_referencia):
+        # 1. Atualiza no Sheets (Pilar atual)
         df_update = conn.read(worksheet="Pedidos", ttl=0)
         df_update.loc[df_update['ID_Item'].isin(lista_ids), 'Status_Atual'] = novo_status
         df_update = df_update.drop_duplicates(subset=['ID_Item'], keep='first')
         conn.update(worksheet="Pedidos", data=df_update)
+        
+        # 2. Atualiza no Supabase (Pilar futuro)
         for id_item in lista_ids:
             try:
                 row = df_referencia[df_referencia['ID_Item'] == id_item].iloc[0]
@@ -267,13 +289,13 @@ if login():
                                 except: return "S/D"
                             
                             rows_to_move['Performance'] = rows_to_move.apply(calcular_performance, axis=1)
-                            
                             df_final_hist = pd.concat([df_historico, rows_to_move], ignore_index=True)
                             df_final_pedidos = df_pedidos[~df_pedidos['ID_Item'].isin(selecionados)]
                             
                             conn.update(worksheet="Pedidos_Concluidos", data=df_final_hist)
                             conn.update(worksheet="Pedidos", data=df_final_pedidos)
                             
+                            # SINCRONIA SUPABASE: Arquiva o item no banco também
                             for id_item in selecionados:
                                 try:
                                     supabase.table("pedidos").update({"status_atual": "ARQUIVADO"}).eq("id_item", id_item).execute()
@@ -327,26 +349,42 @@ if login():
                         if st.form_submit_button("VALIDAR LOTE SELECIONADO 🚀", disabled=not pode_assinar):
                             if not all(respostas.values()): st.error(f"❌ BLOQUEIO: {msg_bloqueio}")
                             else:
+                                # 1. Grava no Sheets
                                 df_gate = conn.read(worksheet=aba, ttl="1m")
                                 novas_linhas = []
                                 logs_auditoria = []
+                                
                                 for id_item in selecionados:
                                     dono_item = itens_pendentes[itens_pendentes['ID_Item'] == id_item]['Dono'].iloc[0]
-                                    
                                     nova = {"Data": datetime.now().strftime("%d/%m/%Y %H:%M"), "ID_Item": id_item, "Validado_Por": st.session_state.user_display, "Obs": obs}
                                     nova.update(respostas); novas_linhas.append(nova)
                                     item_nome = itens_pendentes[itens_pendentes['ID_Item'] == id_item]['Pedido'].iloc[0]
-                                    logs_auditoria.append({
+                                    
+                                    log_entry = {
                                         "Data": datetime.now().strftime("%d/%m/%Y %H:%M"),
                                         "Pedido": item_nome, "Usuario": st.session_state.user_display,
                                         "Dono": dono_item,
                                         "O que mudou": f"GATE: Avanço para {proximo_status}. Obs: {obs}",
                                         "Impacto no Prazo": "Não", "Impacto Financeiro": "Não", "CTR": ctr_sel
-                                    })
+                                    }
+                                    logs_auditoria.append(log_entry)
+                                    
+                                    # 2. Sincronia Supabase (Logs e Checklists)
+                                    log_auditoria_supabase(log_entry)
+                                    try:
+                                        supabase.table("checklists_gates").insert({
+                                            "gate": gate_id, "id_item": id_item, "validado_por": st.session_state.user_display,
+                                            "obs": obs, "respostas": respostas
+                                        }).execute()
+                                    except: pass
+
                                 conn.update(worksheet=aba, data=pd.concat([df_gate, pd.DataFrame(novas_linhas)], ignore_index=True))
                                 df_alt = conn.read(worksheet="Alteracoes", ttl="1m")
                                 conn.update(worksheet="Alteracoes", data=pd.concat([df_alt, pd.DataFrame(logs_auditoria)], ignore_index=True))
+                                
+                                # 3. Atualiza Status (Sheets + Supabase)
                                 atualizar_status_lote(selecionados, proximo_status, df_p)
+                                
                                 st.success(f"🚀 {len(selecionados)} itens validados!")
                                 disparar_foguete(); time.sleep(1); st.rerun()
         except Exception as e: st.error(f"Erro: {e}")
@@ -390,7 +428,6 @@ if login():
                                         if not motivo_ret: st.warning("Descreva o motivo.")
                                         else:
                                             atualizar_status_lote([item['ID_Item']], "⚠️ Em Retrabalho", df_p)
-                                            df_alt = conn.read(worksheet="Alteracoes", ttl=0)
                                             log_r = {
                                                 "Data": datetime.now().strftime("%d/%m/%Y %H:%M"), 
                                                 "Pedido": item['Pedido'], 
@@ -401,7 +438,10 @@ if login():
                                                 "Impacto Financeiro": "Sim", 
                                                 "CTR": ctr_sel
                                             }
+                                            df_alt = conn.read(worksheet="Alteracoes", ttl=0)
                                             conn.update(worksheet="Alteracoes", data=pd.concat([df_alt, pd.DataFrame([log_r])], ignore_index=True))
+                                            log_auditoria_supabase(log_r)
+                                            
                                             try:
                                                 df_hist_ret = conn.read(worksheet="Historico_Retrabalho", ttl=0)
                                                 log_h = {"Data": log_r['Data'], "ID_Item": item['ID_Item'], "Pedido": item['Pedido'], "Dono": item['Dono'], "CTR": ctr_sel, "Motivo_Entrada": motivo_ret}
@@ -464,7 +504,7 @@ if login():
     elif menu == "🛠️ Portão de Retrabalho":
         st.header("🛠️ Gestão de Retrabalho")
         
-        # --- NOVO: RESGATE DE ITENS CONCLUÍDOS ---
+        # --- RESGATE DE ITENS CONCLUÍDOS ---
         with st.expander("⏪ Resgatar Item do Histórico (Concluídos)"):
             if df_concluidos_global.empty:
                 st.info("Não há histórico de itens concluídos.")
@@ -489,19 +529,16 @@ if login():
                             # 2. Mover item
                             row_resgate = df_hist_atual[df_hist_atual['ID_Item'] == item_resgate].copy()
                             row_resgate['Status_Atual'] = "⚠️ Em Retrabalho"
-                            
-                            # Limpar colunas de conclusão para o item voltar limpo
                             for col in ["Data_Finalizacao", "Performance"]:
                                 if col in row_resgate.columns: row_resgate[col] = None
                                 
                             # 3. Atualizar Planilhas
                             df_novo_pedidos = pd.concat([df_pedidos_atual, row_resgate], ignore_index=True)
                             df_novo_hist = df_hist_atual[df_hist_atual['ID_Item'] != item_resgate]
-                            
                             conn.update(worksheet="Pedidos", data=df_novo_pedidos)
                             conn.update(worksheet="Pedidos_Concluidos", data=df_novo_hist)
                             
-                            # 4. Logs
+                            # 4. Logs (Sheets + Supabase)
                             log_res = {
                                 "Data": datetime.now().strftime("%d/%m/%Y %H:%M"), 
                                 "Pedido": row_resgate['Pedido'].iloc[0], 
@@ -512,8 +549,9 @@ if login():
                             }
                             df_alt = conn.read(worksheet="Alteracoes", ttl=0)
                             conn.update(worksheet="Alteracoes", data=pd.concat([df_alt, pd.DataFrame([log_res])], ignore_index=True))
+                            log_auditoria_supabase(log_res)
                             
-                            # 5. Supabase
+                            # 5. Sincronia Supabase Status
                             salvar_no_supabase(item_resgate, "⚠️ Em Retrabalho", row_resgate.iloc[0])
                             
                             st.success("Item resgatado com sucesso!")
@@ -549,6 +587,12 @@ if login():
                                     df_chk = conn.read(worksheet="Checklist_Retrabalho", ttl=0)
                                     novas_chks = [{"Data": datetime.now().strftime("%d/%m/%Y %H:%M"), "ID_Item": i, "Validado_Por": st.session_state.user_display, "Obs": obs_ret} for i in selecionados]
                                     conn.update(worksheet="Checklist_Retrabalho", data=pd.concat([df_chk, pd.DataFrame(novas_chks)], ignore_index=True))
+                                    # Sincronia Supabase Checklist Retrabalho
+                                    for i in selecionados:
+                                        supabase.table("checklists_gates").insert({
+                                            "gate": "RETRABALHO", "id_item": i, "validado_por": st.session_state.user_display, "obs": obs_ret,
+                                            "respostas": {"Dano_Identificado": c1, "Material_Solicitado": c2, "Prioridade_PCP": c3}
+                                        }).execute()
                                 except: pass
                                 
                                 atualizar_status_lote(selecionados, proximo_gate, df_ret)
@@ -575,11 +619,9 @@ if login():
         try:
             df_p = df_global.copy()
             df_h = df_concluidos_global.copy()
-            
             c_p1, c_p2, c_p3 = st.columns([2, 2, 4])
             data_ini = c_p1.date_input("Início", value=date.today() - timedelta(days=30))
             data_fim = c_p2.date_input("Fim", value=date.today())
-            
             todos_gestores = sorted(list(set(df_p['Dono'].unique()) | set(df_h['Dono'].unique() if not df_h.empty else [])))
             gestor_sel = c_p3.multiselect("🔍 Filtrar por Dono do Pedido", todos_gestores, key="filtro_bi_gestor")
             
@@ -631,7 +673,6 @@ if login():
                 f_ini = c1.date_input("De", value=date.today() - timedelta(days=7))
                 f_fim = c2.date_input("Até", value=date.today())
                 f_ctr = c3.multiselect("Filtrar CTR", sorted(df_aud['CTR'].dropna().unique()))
-                
                 c4, c5, c6 = st.columns(3)
                 f_prazo = c4.multiselect("Impacto no Prazo", ["Sim", "Não"])
                 f_finan = c5.multiselect("Impacto Financeiro", ["Sim", "Não"])
@@ -651,14 +692,12 @@ if login():
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                     df_final_aud.to_excel(writer, index=False, sheet_name='Auditoria')
                 processed_data = output.getvalue()
-                
                 st.download_button(
                     label="📥 Baixar Auditoria em Excel",
                     data=processed_data,
                     file_name=f'auditoria_marcenaria_{datetime.now().strftime("%Y%m%d_%H%M")}.xlsx',
                     mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
                 )
-            
         except Exception as e: st.error(f"Erro na auditoria: {e}")
 
     elif menu == "⚠️ Alteração de Pedido":
@@ -696,22 +735,24 @@ if login():
                                     df_save = df_save.drop_duplicates(subset=['ID_Item'], keep='first')
                                     conn.update(worksheet="Pedidos", data=df_save)
                                     st.cache_data.clear()
-                                    df_alt = conn.read(worksheet="Alteracoes", ttl=0)
                                     
+                                    # Logs Híbridos
                                     logs = []
                                     for id_item in selecionados:
                                         item_nome = df_save[df_save['ID_Item'] == id_item]['Pedido'].iloc[0]
-                                        logs.append({
+                                        log_entry = {
                                             "Data": datetime.now().strftime("%d/%m/%Y %H:%M"), 
-                                            "Pedido": item_nome, 
-                                            "CTR": ctr_sel, 
-                                            "Usuario": st.session_state.user_display, 
+                                            "Pedido": item_nome, "CTR": ctr_sel, "Usuario": st.session_state.user_display, 
                                             "Dono": novo_gestor,
                                             "O que mudou": f"LOTE: Data {nova_data} / Gestor {novo_gestor}. Motivo: {motivo}", 
-                                            "Impacto no Prazo": imp_prazo, 
-                                            "Impacto Financeiro": imp_financeiro
-                                        })
+                                            "Impacto no Prazo": imp_prazo, "Impacto Financeiro": imp_financeiro
+                                        }
+                                        logs.append(log_entry)
+                                        log_auditoria_supabase(log_entry) # Sincronia Supabase
+                                    
+                                    df_alt = conn.read(worksheet="Alteracoes", ttl=0)
                                     conn.update(worksheet="Alteracoes", data=pd.concat([df_alt, pd.DataFrame(logs)], ignore_index=True))
+                                    
                                     for id_item in selecionados:
                                         row_alt = df_save[df_save['ID_Item'] == id_item].iloc[0]
                                         salvar_no_supabase(id_item, row_alt['Status_Atual'], row_alt)
