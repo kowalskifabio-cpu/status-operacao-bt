@@ -232,9 +232,10 @@ if login():
         "📊 Resumo e Prazos (Itens)", 
         "📈 Indicadores de Performance", 
         "🚨 Auditoria", 
+        "📋 Central de Relatórios", # Novo Módulo
         "🛠️ Portão de Retrabalho",
-        "💰 Gate 1: Material", # Invertido
-        "✅ Gate 2: Aceite Técnico", # Invertido
+        "💰 Gate 1: Material", 
+        "✅ Gate 2: Aceite Técnico", 
         "🏭 Gate 3: Production", 
         "🚛 Gate 4: Entrega", 
         "⚠️ Alteração de Pedido",
@@ -600,18 +601,80 @@ if login():
                                 atualizar_status_lote(selecionados, proximo_gate, df_ret)
                                 st.success("Itens reintroduzidos no fluxo!"); time.sleep(1); st.rerun()
 
-    # --- NOVO GATE 1: MATERIAL (APONTA PARA CHECKLIST_G2) ---
+    # --- ABA: CENTRAL DE RELATÓRIOS (NOVO) ---
+    elif menu == "📋 Central de Relatórios":
+        st.header("📋 Emissão de Relatórios por CTR")
+        
+        ctrs_disponiveis = sorted(df_global['CTR'].unique().tolist())
+        ctr_rel = st.selectbox("Selecione a CTR para gerar o relatório:", [""] + ctrs_disponiveis)
+        
+        if ctr_rel:
+            tipo_rel = st.radio("Selecione o Tipo de Relatório:", 
+                                ["Dossiê Técnico (Fábrica)", "Relatório de Impedimentos (Gestão)", "Certificado de Qualidade (Cliente)"])
+            
+            # Coleta de Observações em todas as abas de Checklist
+            abas_checklist = ["Checklist_G1", "Checklist_G2", "Checklist_G3", "Checklist_G4", "Checklist_Retrabalho"]
+            todas_obs = []
+            
+            with st.spinner("Compilando dados..."):
+                for aba in abas_checklist:
+                    try:
+                        df_tmp = conn.read(worksheet=aba, ttl="1m")
+                        # Filtra apenas itens que pertencem à CTR selecionada
+                        itens_da_ctr = df_global[df_global['CTR'] == ctr_rel]['ID_Item'].tolist()
+                        df_tmp = df_tmp[df_tmp['ID_Item'].isin(itens_da_ctr)]
+                        
+                        if not df_tmp.empty:
+                            df_tmp['Gate'] = aba.replace("Checklist_", "")
+                            todas_obs.append(df_tmp[['Data', 'ID_Item', 'Validado_Por', 'Obs', 'Gate']])
+                    except: continue
+                
+            if not todas_obs:
+                st.warning("Nenhuma observação registrada para esta CTR ainda.")
+            else:
+                df_final_rel = pd.concat(todas_obs, ignore_index=True)
+                # Cruzamento com Pedidos para pegar o nome amigável do item
+                df_final_rel = df_final_rel.merge(df_global[['ID_Item', 'Pedido']], on='ID_Item', how='left')
+                df_final_rel = df_final_rel.sort_values(by='Data', ascending=False)
+                
+                # Aplicação de filtros baseados no tipo de relatório
+                if tipo_rel == "Relatório de Impedimentos (Gestão)":
+                    df_final_rel = df_final_rel[df_final_rel['Obs'].str.contains('BLOQUEADO|PARADO|ERRO|FALTA|PROBLEMA', case=False, na=False)]
+                elif tipo_rel == "Certificado de Qualidade (Cliente)":
+                    df_final_rel = df_final_rel[df_final_rel['Gate'].isin(['G4', 'G3'])]
+
+                st.subheader(f"📄 {tipo_rel}")
+                st.info(f"CTR: {ctr_rel} | Total de Registros: {len(df_final_rel)}")
+                
+                # Exibição Scannable
+                for _, r in df_final_rel.iterrows():
+                    with st.expander(f"📅 {r['Data']} - {r['Pedido']} ({r['Gate']})"):
+                        st.write(f"**Responsável:** {r['Validado_Por']}")
+                        st.write(f"**Nota:** {r['Obs'] if r['Obs'] else 'Sem comentário adicional.'}")
+
+                # Opção de Exportação Excel para Impressão
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                    df_final_rel[['Data', 'Gate', 'Pedido', 'Validado_Por', 'Obs']].to_excel(writer, index=False, sheet_name='Relatorio')
+                    workbook = writer.book
+                    worksheet = writer.sheets['Relatorio']
+                    header_format = workbook.add_format({'bold': True, 'bg_color': '#634D3E', 'font_color': 'white'})
+                    for col_num, value in enumerate(df_final_rel[['Data', 'Gate', 'Pedido', 'Validado_Por', 'Obs']].columns.values):
+                        worksheet.write(0, col_num, value, header_format)
+                
+                st.download_button(
+                    label="📥 Gerar Arquivo para Impressão (Excel)",
+                    data=output.getvalue(),
+                    file_name=f"Relatorio_{tipo_rel}_{ctr_rel}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+
     elif menu == "💰 Gate 1: Material":
         itens = {"Materiais": ["Lista validada", "Quantidades conferidas", "Materiais especiais"], "Compras": ["Fornecedores definidos", "Lead times confirmados", "Datas registradas"], "Financeiro": ["Impacto caixa validado", "Compra autorizada", "Forma de pagamento"]}
-        # proximo_status: Aguardando Aceite Técnico (G2)
-        # aba: Checklist_G2 (mantendo sua fonte de dados de materiais)
         checklist_gate("GATE 1 (MAT)", "Checklist_G2", itens, "Financeiro", "Compras", "Falta material ➡️ PARADO", "Aguardando Aceite Técnico (G2)", "Fábrica sem parada", "Na montagem", df_global)
 
-    # --- NOVO GATE 2: ACEITE TÉCNICO (APONTA PARA CHECKLIST_G1) ---
     elif menu == "✅ Gate 2: Aceite Técnico":
         itens = {"Informações Comerciais": ["Pedido registrado", "Cliente identificado", "Tipo de obra definido", "Responsável identificado"], "Escopo Técnico": ["Projeto mínimo recebido", "Ambientes definidos", "Materiais principais", "Itens fora do padrão"], "Prazo (prévia)": ["Prazo solicitado registrado", "Prazo avaliado", "Risco de prazo"], "Governança": ["Dono do Pedido definido", "PCP validou viabilidade", "Aprovado formalmente"]}
-        # proximo_status: Aguardando Produção (G3)
-        # aba: Checklist_G1 (mantendo sua fonte de dados de aceite técnico)
         checklist_gate("GATE 2 (TEC)", "Checklist_G1", itens, "Dono do Pedido (DP)", "PCP", "Projeto incompleto ➡️ BLOQUEADO", "Aguardando Produção (G3)", "Impedir entrada mal definida", "Antes do plano", df_global)
 
     elif menu == "🏭 Gate 3: Production":
@@ -648,7 +711,6 @@ if login():
             st.subheader("🚧 Fluxo de Itens por Portão")
             gates_count = df_p['Status_Atual'].value_counts()
             c_g1, c_g2, c_g3, c_g4, c_r = st.columns(5)
-            # Atualização dos textos nos indicadores
             c_g1.metric("Materiais (G1)", gates_count.get("Aguardando Materiais (G1)", 0))
             c_g2.metric("Aceite Técnico (G2)", gates_count.get("Aguardando Aceite Técnico (G2)", 0))
             c_g3.metric("Produção (G3)", gates_count.get("Aguardando Produção (G3)", 0))
@@ -785,7 +847,6 @@ if login():
                             dt_crua = pd.to_datetime(r['Data Entrega'], errors='coerce')
                             dt_limpa = dt_crua.strftime('%Y-%m-%d') if pd.notnull(dt_crua) else ""
                             if str(uid) not in df_base['ID_Item'].astype(str).values:
-                                # AGORA NASCE COM STATUS DE MATERIAIS (NOVO PASSO 1)
                                 payload_novo = {"ID_Item": uid, "CTR": r['Centro de custo'], "Obra": r['Obra'], "Item": r['Item'], "Pedido": r['Produto'], "Dono": r['Gestor'], "Status_Atual": "Aguardando Materiais (G1)", "Data_Entrega": dt_limpa, "Quantidade": r['Quantidade'], "Unidade": r['Unidade']}
                                 novos.append(payload_novo)
                         if novos: 
@@ -818,7 +879,6 @@ if login():
                     df_hist_full = conn.read(worksheet="Pedidos_Concluidos", ttl=0)
                     prog = st.progress(0)
                     for i, row in df_hist_full.iterrows():
-                        # Usamos a mesma tabela 'pedidos' com status 'ARQUIVADO'
                         salvar_no_supabase(row['ID_Item'], "ARQUIVADO", row)
                         prog.progress((i + 1) / len(df_hist_full))
                 st.success("Histórico sincronizado na tabela 'pedidos'!")
@@ -831,7 +891,6 @@ if login():
                     prog_a = st.progress(0)
                     lote = []
                     for i, row in df_aud_full.iterrows():
-                        # O segredo aqui é usar as aspas duplas no payload para casar com o SQL Maiúsculo
                         lote.append({
                             "Data": str(row['Data']), 
                             "Pedido": str(row['Pedido']),
