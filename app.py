@@ -182,27 +182,29 @@ if login():
     def log_auditoria_supabase(log_dict):
         """Registra alteração na tabela de auditoria do Supabase"""
         try:
+            # Note o uso exato das aspas para casar com o SQL Maiúsculo
             payload = {
-                "pedido": log_dict.get('Pedido'),
-                "usuario": log_dict.get('Usuario'),
-                "dono": log_dict.get('Dono'),
-                "o_que_mudou": log_dict.get('O que mudou'),
-                "impacto_prazo": log_dict.get('Impacto no Prazo'),
-                "impacto_financeiro": log_dict.get('Impacto Financeiro'),
-                "ctr": log_dict.get('CTR')
+                "Data": str(log_dict.get('Data', '')),
+                "Pedido": str(log_dict.get('Pedido', '')),
+                "Usuario": str(log_dict.get('Usuario', '')),
+                "O que mudou": str(log_dict.get('O que mudou', '')),
+                "Impacto no Prazo": str(log_dict.get('Impacto no Prazo', '')),
+                "Impacto Financeiro": str(log_dict.get('Impacto Financeiro', '')),
+                "CTR": str(log_dict.get('CTR', '')),
+                "Dono": str(log_dict.get('Dono', ''))
             }
             supabase.table("alteracoes").insert(payload).execute()
         except Exception as e:
             pass
 
     def atualizar_status_lote(lista_ids, novo_status, df_referencia):
-        # 1. Atualiza no Sheets (Pilar atual)
+        # 1. Atualiza no Sheets
         df_update = conn.read(worksheet="Pedidos", ttl=0)
         df_update.loc[df_update['ID_Item'].isin(lista_ids), 'Status_Atual'] = novo_status
         df_update = df_update.drop_duplicates(subset=['ID_Item'], keep='first')
         conn.update(worksheet="Pedidos", data=df_update)
         
-        # 2. Atualiza no Supabase (Pilar futuro)
+        # 2. Atualiza no Supabase
         for id_item in lista_ids:
             try:
                 row = df_referencia[df_referencia['ID_Item'] == id_item].iloc[0]
@@ -790,34 +792,48 @@ if login():
 
     elif menu == "⚙️ SINCRONIZAÇÃO SUPABASE":
         st.header("⚙️ Sincronização em Massa")
-        col_sinc1, col_sinc2 = st.columns(2)
+        c1, c2, c3 = st.columns(3)
         
-        with col_sinc1:
-            st.subheader("Pedidos Ativos")
-            if st.button("🚀 FORÇAR SINCRONIZAÇÃO GERAL"):
+        with c1:
+            st.subheader("1. Ativos")
+            if st.button("🚀 SINCRONIZAR ATIVOS"):
                 with st.spinner("Sincronizando ativos..."):
                     for idx, row in df_global.iterrows():
                         salvar_no_supabase(row['ID_Item'], row['Status_Atual'], row)
-                st.success("Base do Supabase (Ativos) atualizada!")
+                st.success("Pedidos ativos sincronizados!")
 
-        with col_sinc2:
-            st.subheader("Histórico de Concluídos")
-            if st.button("🏁 SINCRONIZAR HISTÓRICO (765 ITENS)"):
-                with st.spinner("Isso pode levar alguns minutos..."):
+        with c2:
+            st.subheader("2. Histórico")
+            if st.button("🏁 SINCRONIZAR HISTÓRICO"):
+                with st.spinner("Migrando baixas..."):
                     df_hist_full = conn.read(worksheet="Pedidos_Concluidos", ttl=0)
-                    progress_bar = st.progress(0)
-                    total = len(df_hist_full)
+                    prog = st.progress(0)
                     for i, row in df_hist_full.iterrows():
-                        payload = {
-                            "id_item": str(row['ID_Item']), "status_atual": "ARQUIVADO",
-                            "ctr": str(row.get('CTR', '')), "obra": str(row.get('Obra', '')),
-                            "item_projeto": str(row.get('Item', '')), "pedido": str(row.get('Pedido', '')),
-                            "dono": str(row.get('Dono', '')),
-                            "data_entrega": str(row['Data_Entrega']) if pd.notnull(row.get('Data_Entrega')) else None
-                        }
-                        supabase.table("pedidos").upsert(payload).execute()
-                        progress_bar.progress((i + 1) / total)
-                    st.success(f"✅ {total} itens do histórico migrados para o Supabase!")
+                        salvar_no_supabase(row['ID_Item'], "ARQUIVADO", row)
+                        prog.progress((i + 1) / len(df_hist_full))
+                st.success("Histórico sincronizado!")
+
+        with c3:
+            st.subheader("3. Alterações (2.500+)")
+            if st.button("🚨 SINCRONIZAR LOGS"):
+                with st.spinner("Migrando auditoria..."):
+                    df_aud_full = conn.read(worksheet="Alteracoes", ttl=0)
+                    prog_a = st.progress(0)
+                    lote = []
+                    for i, row in df_aud_full.iterrows():
+                        lote.append({
+                            "Data": str(row['Data']), "Pedido": str(row['Pedido']),
+                            "Usuario": str(row['Usuario']), "O que mudou": str(row['O que mudou']),
+                            "Impacto no Prazo": str(row['Impacto no Prazo']),
+                            "Impacto Financeiro": str(row['Impacto Financeiro']),
+                            "CTR": str(row['CTR']), "Dono": str(row.get('Dono', ''))
+                        })
+                        if len(lote) >= 50:
+                            supabase.table("alteracoes").insert(lote).execute()
+                            lote = []
+                        prog_a.progress((i + 1) / len(df_aud_full))
+                    if lote: supabase.table("alteracoes").insert(lote).execute()
+                st.success("Alterações migradas para o Supabase!")
 
     elif menu == "🛠️ Recuperação de Pedidos":
         st.header("🛠️ Recuperação e Limpeza de Dados")
